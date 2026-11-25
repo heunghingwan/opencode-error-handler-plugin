@@ -4,30 +4,20 @@
 
 OpenCode v2 插件：按供應商客製錯誤處理（智慧重試、額度感知等待、RPC 通知）。
 
-## 開始任何工作前
-
-如果本地存在 `HANDOFF.md`（未追蹤的交接文件），**先完整讀取**。它包含：
-
-- 已對源碼驗證的 OpenCode 重試機制與 `session.retry` hook 事實（勿重複調查）
-- zhipuai-coding-plan 錯誤格式（1302/1308/1305）
-- 與用戶定案的設計（A＋分段、RPC 通知）
-- 本機參考路徑（OpenCode 源碼 checkout、模板插件）
-
 ## ⚠️ 目錄結構紅線
 
 **插件源碼絕不放在 `.opencode/plugins/` 下。**
 
 OpenCode 會自動載入任何設定目錄（專案的 `.opencode/`、全域 `~/.config/opencode/`）下的
 `plugin/` 或 `plugins/` 子目錄裡的所有 `.ts`/`.js`（`packages/core/src/plugin/source-directory.ts`）。
-remote-notifier 之前放在 `.opencode/plugins/` 才會「在倉庫裡開發就自己載入」。
 本插件會改動重試行為，開發中的半成品絕不能自動生效。
 
 ```
 opencode-error-handler-plugin/
 ├── package.json            # main 指向 src/ 進入點；依賴 @opencode/plugin
-├── src/                    # 插件源碼（index.ts + 模組）
+├── src/                    # 插件源碼（index.ts + providers/ + 模組）
+│   └── providers/          # 每個供應商一個獨立檔案，新增供應商＝新增檔案
 ├── test/                   # bun test
-├── HANDOFF.md              # 僅本地，不入庫（見 .gitignore）
 └── README.md
 ```
 
@@ -42,7 +32,9 @@ opencode-error-handler-plugin/
 
 ## 慣例
 
-- TypeScript，_logger／檔案式設定模式_ 比照 remote-notifier，但目錄結構照上面的紅線
+- TypeScript，logger 與檔案式設定模式比照
+  `/path/to/opencode-remote-notifier-plugin`（但目錄結構照上面的紅線）
 - 測試用 bun test（`test/`）
 - 用戶設定檔放 `~/.config/opencode/`，repo 內只放範本
 - 通知一律走 remote-notifier 的 RPC，本插件不自建通知系統
+- OpenCode 源碼參考：`/path/to/opencode-source`（hook／分類／重試源碼位置見文件）
