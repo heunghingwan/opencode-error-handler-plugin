@@ -50,6 +50,7 @@ function harness(config: Partial<ProviderConfig> = {}, now: number = NOW): Harne
   const sent: Notification[] = []
   const send: NotifySender = (n) => {
     sent.push(n)
+    return true
   }
   const cfg: ProviderConfig = {
     enabled: config.enabled ?? DEFAULT_CONFIG.enabled,
@@ -218,7 +219,7 @@ describe("notification dedup", () => {
     let now = NOW
     const sent: Notification[] = []
     const handler = zhipuaiCodingPlan.createHandler(
-      { now: () => now, send: (n) => void sent.push(n), logger: silentLogger },
+      { now: () => now, send: (n) => { sent.push(n); return true }, logger: silentLogger },
       DEFAULT_CONFIG,
     )
     const body = JSON.stringify({ error: { code: "1309", message: "您的 GLM Coding Plan 套餐已到期，暂无法使用" } })
@@ -286,5 +287,104 @@ test("DEFAULT_CONFIG ships zhipuai enabled with notifications", () => {
     enabled: true,
     notify: true,
     quota: { waitSegments: 7, reserve: 3, minSegmentMs: 60_000, maxSegmentMs: 2_700_000 },
+  })
+})
+
+describe("notification delivery failures release the dedup window", () => {
+  const flush = () => new Promise<void>((r) => setTimeout(r, 0))
+
+  test("an undelivered send (false) retries on the next event; success holds", async () => {
+    const sent: Notification[] = []
+    let deliver = false
+    const handler = zhipuaiCodingPlan.createHandler(
+      { now: () => NOW, send: (n) => { sent.push(n); return deliver }, logger: silentLogger },
+      DEFAULT_CONFIG,
+    )
+    const body = body1308(RESET_A)
+    handler(ev(body)) // first 1308: send attempted, not delivered
+    await flush()
+    expect(sent).toHaveLength(1)
+    handler(ev(body)) // gate released → re-attempt, still failing
+    await flush()
+    expect(sent).toHaveLength(2)
+    deliver = true
+    handler(ev(body)) // released again → now delivered
+    await flush()
+    expect(sent).toHaveLength(3)
+    handler(ev(body)) // delivered → gate holds → no fourth send
+    await flush()
+    expect(sent).toHaveLength(3)
+  })
+
+  test("an async rejection also releases the window", async () => {
+    const sent: Notification[] = []
+    let reject = true
+    const handler = zhipuaiCodingPlan.createHandler(
+      {
+        now: () => NOW,
+        send: (n) => {
+          sent.push(n)
+          return reject ? Promise.reject(new Error("rpc down")) : Promise.resolve(true)
+        },
+        logger: silentLogger,
+      },
+      DEFAULT_CONFIG,
+    )
+    const body = body1308(RESET_A)
+    handler(ev(body))
+    await flush()
+    expect(sent).toHaveLength(1)
+    reject = false
+    handler(ev(body))
+    await flush()
+    expect(sent).toHaveLength(2)
+    handler(ev(body))
+    await flush()
+    expect(sent).toHaveLength(2)
+  })
+
+  test("a sync-throwing sender releases the window and never breaks the decision", async () => {
+    const sent: Notification[] = []
+    let throwSync = true
+    const handler = zhipuaiCodingPlan.createHandler(
+      {
+        now: () => NOW,
+        send: (n) => {
+          sent.push(n)
+          if (throwSync) throw new Error("boom")
+          return true
+        },
+        logger: silentLogger,
+      },
+      DEFAULT_CONFIG,
+    )
+    const event = ev(body1308(RESET_A))
+    expect(() => handler(event)).not.toThrow()
+    expect(event.decision.retry).toBe(true)
+    await flush()
+    expect(sent).toHaveLength(1)
+    throwSync = false
+    handler(ev(body1308(RESET_A)))
+    await flush()
+    expect(sent).toHaveLength(2)
+  })
+
+  test("tracks scheduled quota waits via deps.track", () => {
+    const tracked: Array<[string, { code: string; resetRaw: string; delayMs: number }]> = []
+    const handler = zhipuaiCodingPlan.createHandler(
+      {
+        now: () => NOW,
+        send: () => true,
+        logger: silentLogger,
+        track: (sessionID, wait) => tracked.push([sessionID, wait]),
+      },
+      DEFAULT_CONFIG,
+    )
+    handler(ev(body1308(RESET_A)))
+    expect(tracked).toHaveLength(1)
+    expect(tracked[0]![0]).toBe("ses_1")
+    expect(tracked[0]![1].code).toBe("1308")
+    expect(tracked[0]![1].resetRaw).toBe(RESET_A)
+    expect(tracked[0]![1].delayMs).toBeGreaterThan(0)
   })
 })

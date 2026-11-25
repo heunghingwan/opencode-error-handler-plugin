@@ -18,7 +18,12 @@ export interface Notification {
   priority?: number
 }
 
-export type NotifySender = (n: Notification) => Promise<void> | void
+/**
+ * Delivers one notification. Returns whether it was actually delivered
+ * (or accepted by the transport): `false`/throw means dropped, which lets
+ * callers undo their dedup key so the next event re-attempts the send.
+ */
+export type NotifySender = (n: Notification) => Promise<boolean> | boolean
 
 /** Loose placeholder for the future remote-notifier RPC definition. */
 const LOOSE_REMOTE_NOTIFIER_RPC = {
@@ -62,9 +67,19 @@ export class NotifyGate {
     }
     return true
   }
+
+  /**
+   * Undoes a recent `allow` for `key`: the next `allow` with the same key
+   * sends again. Used when a delivery failed — a dropped notification must
+   * not consume the window's only send (e.g. the notifier RPC was
+   * unavailable during a plugin install/update timing gap).
+   */
+  release(key: string): void {
+    this.#sent.delete(key)
+  }
 }
 
-/** Fire-and-forget RPC sender; never throws, never blocks the caller. */
+/** Fire-and-forget RPC sender; never throws; reports delivery as boolean. */
 export function createRpcSender(rpc: unknown, logger: Logger): NotifySender {
   return async (input) => {
     try {
@@ -72,9 +87,15 @@ export function createRpcSender(rpc: unknown, logger: Logger): NotifySender {
         | ((definition: unknown) => { notify: (input: Notification) => Promise<unknown> })
         | undefined
       )?.(LOOSE_REMOTE_NOTIFIER_RPC)
-      await client?.notify(input)
+      const result = await client?.notify(input)
+      // The remote-notifier RPC answers { sent: boolean }: a false means it
+      // dropped the notification (disabled or rate limited) — treat that as
+      // not delivered so the caller re-attempts on the next event.
+      const sent = (result as { sent?: boolean } | undefined)?.sent
+      return sent === undefined ? true : sent !== false
     } catch (err) {
       logger.debug("remote-notifier RPC unavailable, notification dropped", { error: String(err) })
+      return false
     }
   }
 }

@@ -122,3 +122,21 @@ bun run typecheck
 
 Pure TypeScript; the only runtime dependency is `@opencode/plugin`.
 Structure: `src/` (index + providers + modules), `test/` (bun test).
+
+## Logging
+
+OpenCode plugins have no server-log API and plugin console output is discarded
+under the background service, while **recovered retries leave no trace in
+OpenCode's database** — so the plugin keeps its own JSONL audit log:
+
+- **Path**: `~/.local/share/opencode/log/error-handler.log` (override with the
+  `ERROR_HANDLER_LOG` environment variable; rotates at 2 MiB to `.log.1`)
+- **Every decision**: each `session.retry` event with the parsed code, attempt,
+  decision (wait segment count + delay, extended backoff, fail-fast, or
+  "built-in"), and the parsed reset time
+- **Quota recovery**: the session's next successful turn after a scheduled wait
+  is logged as `quota recovered — session resumed` with the total wait
+- **Notification outcomes**: delivered / not delivered, and dedup-window
+  rollback when the remote-notifier RPC was unavailable (a failed delivery
+  re-attempts on the next retry event instead of losing the window's only
+  notification — covers plugin install/update timing gaps)

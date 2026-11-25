@@ -2,7 +2,7 @@ import { describe, test, expect, beforeEach, afterEach } from "bun:test"
 import fs from "node:fs"
 import os from "node:os"
 import path from "node:path"
-import pluginDefault, { createHookHandler } from "../src/index.ts"
+import pluginDefault, { createHookHandler, createRecoveryTracker } from "../src/index.ts"
 import { providerRegistry } from "../src/registry.ts"
 import type { Notification } from "../src/notify.ts"
 import type { ProviderConfig, RetryEvent } from "../src/types.ts"
@@ -46,7 +46,7 @@ describe("createHookHandler", () => {
     const handler = createHookHandler({
       config: { providers: { "zhipuai-coding-plan": ZHIPUAI } },
       now: () => NOW,
-      send: (n) => void sent.push(n),
+      send: (n) => { sent.push(n); return true },
       logger: silentLogger,
     })
     const event = ev("zhipuai-coding-plan", body("1302", "您的账户已达到速率限制"))
@@ -59,7 +59,7 @@ describe("createHookHandler", () => {
     const handler = createHookHandler({
       config: { providers: { "zhipuai-coding-plan": ZHIPUAI } },
       now: () => NOW,
-      send: (n) => void sent.push(n),
+      send: (n) => { sent.push(n); return true },
       logger: silentLogger,
     })
     const event = ev("anthropic", body("1302", "rate limited"))
@@ -73,7 +73,7 @@ describe("createHookHandler", () => {
     const handler = createHookHandler({
       config: { providers: {} },
       now: () => NOW,
-      send: () => {},
+      send: () => false,
       logger: silentLogger,
     })
     const event = ev("zhipuai-coding-plan", body1308)
@@ -96,7 +96,7 @@ describe("createHookHandler", () => {
       const handler = createHookHandler({
         config: { providers: { "zhipuai-coding-plan": ZHIPUAI } },
         now: () => NOW,
-        send: (n) => void sent.push(n),
+        send: (n) => { sent.push(n); return true },
         logger: silentLogger,
       })
       const event = ev("zhipuai-coding-plan", body1308)
@@ -123,7 +123,7 @@ describe("createHookHandler", () => {
       const handler = createHookHandler({
         config: { providers: { "zhipuai-coding-plan": ZHIPUAI } },
         now: () => NOW,
-        send: (n) => void sent.push(n),
+        send: (n) => { sent.push(n); return true },
         logger: silentLogger,
       })
       const event = ev("zhipuai-coding-plan", body1308)
@@ -139,16 +139,22 @@ describe("createHookHandler", () => {
 describe("Plugin.define wiring", () => {
   let home: string
   let prevHome: string | undefined
+  let prevLog: string | undefined
 
   beforeEach(() => {
     home = fs.mkdtempSync(path.join(os.tmpdir(), "ehp-index-"))
     fs.mkdirSync(path.join(home, ".config", "opencode"), { recursive: true })
     prevHome = process.env.HOME
     process.env.HOME = home
+    // Keep test runs out of the real plugin log.
+    prevLog = process.env.ERROR_HANDLER_LOG
+    process.env.ERROR_HANDLER_LOG = path.join(home, "error-handler.log")
   })
 
   afterEach(() => {
     process.env.HOME = prevHome
+    if (prevLog === undefined) delete process.env.ERROR_HANDLER_LOG
+    else process.env.ERROR_HANDLER_LOG = prevLog
     fs.rmSync(home, { recursive: true, force: true })
   })
 
@@ -211,5 +217,82 @@ describe("Plugin.define wiring", () => {
     const original = event.decision
     await hook(event)
     expect(event.decision).toBe(original)
+  })
+})
+
+describe("createRecoveryTracker", () => {
+  const NOW = Date.UTC(2026, 10, 26, 2, 0, 0)
+  const wait = { code: "1308", resetAt: NOW + 3_600_000, resetRaw: "2026-11-26 11:00:00", delayMs: 600_000, segments: 6 }
+  const logs: Array<{ level: string; msg: string; extra?: Record<string, unknown> }> = []
+  const logger = {
+    debug: (msg: string, extra?: Record<string, unknown>) => logs.push({ level: "debug", msg, extra }),
+    info: (msg: string, extra?: Record<string, unknown>) => logs.push({ level: "info", msg, extra }),
+    warn: (msg: string, extra?: Record<string, unknown>) => logs.push({ level: "warn", msg, extra }),
+    error: (msg: string, extra?: Record<string, unknown>) => logs.push({ level: "error", msg, extra }),
+  }
+  let now = NOW
+  const tracker = createRecoveryTracker(() => now, logger)
+
+  beforeEach(() => {
+    logs.length = 0
+    now = NOW
+  })
+
+  test("logs recovery when the session's next turn succeeds", () => {
+    tracker.track("ses_1", wait)
+    tracker.handleEvent({ type: "session.execution.succeeded", data: { sessionID: "ses_1" } })
+    expect(logs.some((l) => l.msg === "quota recovered — session resumed")).toBe(true)
+    // tracked once: a later succeeded event does not re-log
+    logs.length = 0
+    tracker.handleEvent({ type: "session.execution.succeeded", data: { sessionID: "ses_1" } })
+    expect(logs).toHaveLength(0)
+  })
+
+  test("a failed turn keeps watching; a later success still counts", () => {
+    tracker.track("ses_2", wait)
+    now += 60_000
+    tracker.handleEvent({ type: "session.execution.failed", data: { sessionID: "ses_2" } })
+    expect(logs.some((l) => l.msg === "turn still failing after quota wait")).toBe(true)
+    now += 60_000
+    tracker.handleEvent({ type: "session.execution.succeeded", data: { sessionID: "ses_2" } })
+    expect(logs.some((l) => l.msg === "quota recovered — session resumed")).toBe(true)
+  })
+
+  test("waits include the elapsed time since the first 1308", () => {
+    tracker.track("ses_3", wait)
+    now += 7_200_000
+    tracker.handleEvent({ type: "session.execution.succeeded", data: { sessionID: "ses_3" } })
+    const entry = logs.find((l) => l.msg === "quota recovered — session resumed")
+    expect(entry?.extra?.waitedMs).toBe(7_200_000)
+  })
+
+  test("session.deleted clears the wait silently", () => {
+    tracker.track("ses_4", wait)
+    tracker.handleEvent({ type: "session.deleted", data: { sessionID: "ses_4" } })
+    tracker.handleEvent({ type: "session.execution.succeeded", data: { sessionID: "ses_4" } })
+    expect(logs).toHaveLength(0)
+  })
+
+  test("untracked sessions are ignored", () => {
+    tracker.handleEvent({ type: "session.execution.succeeded", data: { sessionID: "ses_unknown" } })
+    expect(logs).toHaveLength(0)
+  })
+})
+
+describe("createHookHandler threads track into provider deps", () => {
+  test("a scheduled wait is reported through HookDeps.track", () => {
+    const tracked: string[] = []
+    const body1308 = JSON.stringify({
+      error: { code: "1308", message: "已达到 5 小时的使用上限。您的限额将在 2026-11-25 20:10:12 重置。" },
+    })
+    const handler = createHookHandler({
+      config: { providers: { "zhipuai-coding-plan": ZHIPUAI } },
+      now: () => Date.UTC(2026, 10, 25, 10, 0, 0),
+      send: () => true,
+      logger: silentLogger,
+      track: (sessionID) => tracked.push(sessionID),
+    })
+    handler(ev("zhipuai-coding-plan", body1308))
+    expect(tracked).toEqual(["ses_1"])
   })
 })

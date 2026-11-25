@@ -130,43 +130,106 @@ export const zhipuaiCodingPlan: ProviderEntry = {
     const gate = new NotifyGate()
     const logger: Logger = deps.logger
 
-    // Fire-and-forget: never let notification trouble reach the retry path.
-    const fire = (n: Notification) => {
+    // Fire-and-forget with rollback: never let notification trouble reach
+    // the retry path, and never let a FAILED delivery consume a dedup
+    // window — if the notifier RPC is unavailable (e.g. the notifier plugin
+    // is mid-install/update), the next retry event re-attempts the
+    // notification instead of losing it for the whole quota window.
+    const fireGated = (key: string, windowMs: number, n: Notification) => {
+      if (!gate.allow(key, windowMs, deps.now())) return
+      const release = (reason: unknown) => {
+        gate.release(key)
+        logger.debug("notification not delivered — dedup key released for the next retry event", {
+          key,
+          reason: String(reason),
+        })
+      }
       try {
-        void deps.send(n)
+        const result = deps.send(n)
+        Promise.resolve(result).then(
+          (delivered) => {
+            if (delivered !== true) release("sender reported not delivered")
+          },
+          (err) => release(err),
+        )
       } catch (err) {
-        logger.debug("notification send threw synchronously", { error: String(err) })
+        release(err)
       }
     }
 
     return (event: RetryEvent) => {
       const parsed = parseBody(event.error.response?.body)
-      if (!parsed) return // unparseable → built-in policy
+      if (!parsed) {
+        logger.debug("unparseable error body — leaving decision to built-in policy", {
+          session: event.sessionID,
+          provider: event.model.providerID,
+          attempt: event.attempt,
+        })
+        return
+      }
       const code = parsed.code
 
       if (code === RATE_LIMIT_CODE) {
         event.decision = { retry: true, delay: RATE_LIMIT_DELAY_MS }
+        logger.info("rate limit — extended backoff", {
+          session: event.sessionID,
+          code,
+          attempt: event.attempt,
+          delayMs: RATE_LIMIT_DELAY_MS,
+        })
         return
       }
-      if (code === OVERLOAD_CODE) return // built-in backoff is fine for overload
+      if (code === OVERLOAD_CODE) {
+        logger.debug("model overload — built-in policy", {
+          session: event.sessionID,
+          code,
+          attempt: event.attempt,
+        })
+        return
+      }
 
       const fatalHint = FATAL_HINTS[code]
       if (fatalHint !== undefined) {
         event.decision = { retry: false }
-        if (config.notify && gate.allow(`fatal:${code}`, FATAL_DEDUP_MS, deps.now())) {
-          fire({
-            title: `⛔ 智譜請求被拒（${code}）`,
-            message: `${parsed.message}\n重試無法解決，已停止重試。${fatalHint}`,
-            priority: 5,
-          })
+        logger.warn("fatal provider error — failing fast", {
+          session: event.sessionID,
+          code,
+          attempt: event.attempt,
+          message: parsed.message,
+        })
+        if (config.notify) {
+          fireGated(
+            `fatal:${code}`,
+            FATAL_DEDUP_MS,
+            {
+              title: `⛔ 智譜請求被拒（${code}）`,
+              message: `${parsed.message}\n重試無法解決，已停止重試。${fatalHint}`,
+              priority: 5,
+            },
+          )
         }
         return
       }
 
-      if (!QUOTA_CODES.has(code)) return // unknown code → built-in policy
+      if (!QUOTA_CODES.has(code)) {
+        logger.debug("unknown code — built-in policy", {
+          session: event.sessionID,
+          code,
+          attempt: event.attempt,
+        })
+        return
+      }
 
       const reset = parseResetTime(parsed.message)
-      if (!reset) return // quota code without a parseable reset → built-in
+      if (!reset) {
+        logger.warn("quota code without a parseable reset time — built-in policy", {
+          session: event.sessionID,
+          code,
+          attempt: event.attempt,
+          message: parsed.message,
+        })
+        return
+      }
 
       const remaining = reset.epoch - deps.now()
       const segments = segmentsAvailable(event.attempt, config.quota)
@@ -174,12 +237,22 @@ export const zhipuaiCodingPlan: ProviderEntry = {
       if (segments <= 0) {
         // Waiting budget spent, still quota-limited: give up fast.
         event.decision = { retry: false }
-        if (config.notify && gate.allow(`terminal:${reset.raw}`, Infinity, deps.now())) {
-          fire({
-            title: `❌ 智譜額度未恢復（${code}）`,
-            message: `重試預算已用盡仍收到額度上限（${code}），已停止重試。額度重置時間：${reset.raw}。`,
-            priority: 5,
-          })
+        logger.warn("quota wait budget spent — failing fast", {
+          session: event.sessionID,
+          code,
+          attempt: event.attempt,
+          resetAt: reset.raw,
+        })
+        if (config.notify) {
+          fireGated(
+            `terminal:${reset.raw}`,
+            Infinity,
+            {
+              title: `❌ 智譜額度未恢復（${code}）`,
+              message: `重試預算已用盡仍收到額度上限（${code}），已停止重試。額度重置時間：${reset.raw}。`,
+              priority: 5,
+            },
+          )
         }
         return
       }
@@ -188,24 +261,56 @@ export const zhipuaiCodingPlan: ProviderEntry = {
         // The window is beyond what the retry budget can span (weekly or
         // monthly quota): fail fast and tell the user when it resets.
         event.decision = { retry: false }
-        if (config.notify && gate.allow(`terminal:${reset.raw}`, Infinity, deps.now())) {
-          fire({
-            title: `❌ 智譜額度用盡（${code}，無法等待重置）`,
-            message: `距重置時間尚有 ${humanizeMs(remaining)}，超出可等待範圍（${segments} 段 × ${Math.round(config.quota.maxSegmentMs / 60_000)} 分鐘），已停止重試。重置時間：${reset.raw}。`,
-            priority: 5,
-          })
+        logger.warn("quota window beyond wait span — failing fast", {
+          session: event.sessionID,
+          code,
+          attempt: event.attempt,
+          remainingMs: remaining,
+          maxSpanMs: maxSpanMs(segments, config.quota),
+          resetAt: reset.raw,
+        })
+        if (config.notify) {
+          fireGated(
+            `terminal:${reset.raw}`,
+            Infinity,
+            {
+              title: `❌ 智譜額度用盡（${code}，無法等待重置）`,
+              message: `距重置時間尚有 ${humanizeMs(remaining)}，超出可等待範圍（${segments} 段 × ${Math.round(config.quota.maxSegmentMs / 60_000)} 分鐘），已停止重試。重置時間：${reset.raw}。`,
+              priority: 5,
+            },
+          )
         }
         return
       }
 
       const delay = segmentDelay(remaining, segments, config.quota)
       event.decision = { retry: true, delay }
-      if (config.notify && gate.allow(`quota:${reset.raw}`, Infinity, deps.now())) {
-        fire({
-          title: `⚠️ 智譜額度用盡（${code}）`,
-          message: `額度已用盡（錯誤碼 ${code}），將於 ${reset.raw}（UTC+8）重置。已排程分段等待與自動恢復：額度恢復後將自動繼續任務。`,
-          priority: 4,
-        })
+      deps.track?.(event.sessionID, {
+        code,
+        resetAt: reset.epoch,
+        resetRaw: reset.raw,
+        delayMs: delay,
+        segments,
+      })
+      logger.info("quota wait scheduled", {
+        session: event.sessionID,
+        provider: event.model.providerID,
+        code,
+        attempt: event.attempt,
+        segments,
+        delayMs: delay,
+        resetAt: reset.raw,
+      })
+      if (config.notify) {
+        fireGated(
+          `quota:${reset.raw}`,
+          Infinity,
+          {
+            title: `⚠️ 智譜額度用盡（${code}）`,
+            message: `額度已用盡（錯誤碼 ${code}），將於 ${reset.raw}（UTC+8）重置。已排程分段等待與自動恢復：額度恢復後將自動繼續任務。`,
+            priority: 4,
+          },
+        )
       }
     }
   },

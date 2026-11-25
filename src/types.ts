@@ -49,11 +49,26 @@ export interface ProviderConfig {
 // through src/registry.ts. Adding a provider = adding one file + one registry
 // line; nothing else changes.
 
+/** Details of a quota wait scheduled for a session, reported to the host. */
+export interface WaitScheduled {
+  readonly code: string
+  /** Parsed reset time as epoch ms. */
+  readonly resetAt: number
+  /** Verbatim reset timestamp — the window's identity. */
+  readonly resetRaw: string
+  readonly delayMs: number
+  readonly segments: number
+}
+
 /** Dependencies a provider handler runs against (injected for tests). */
 export interface HandlerDeps {
   now(): number
   send: NotifySender
   logger: Logger
+  /** Called when the provider schedules a quota wait for a session. The
+   *  host uses it to log and to watch for recovery (retries that succeed
+   *  leave no trace in OpenCode's database, so the plugin tracks them). */
+  track?(sessionID: string, wait: WaitScheduled): void
 }
 
 /** A registered provider: its defaults plus its handler factory. */
