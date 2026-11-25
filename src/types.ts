@@ -3,6 +3,9 @@
 // loose (unbranded strings) so the pure logic and tests never import the
 // plugin package.
 
+import type { Logger } from "./logger.ts"
+import type { NotifySender } from "./notify.ts"
+
 export interface RetryError {
   readonly type: string
   readonly message: string
@@ -41,3 +44,27 @@ export interface ProviderConfig {
   notify: boolean
   quota: QuotaConfig
 }
+
+// The provider contract: one file per provider under src/providers/, exported
+// through src/registry.ts. Adding a provider = adding one file + one registry
+// line; nothing else changes.
+
+/** Dependencies a provider handler runs against (injected for tests). */
+export interface HandlerDeps {
+  now(): number
+  send: NotifySender
+  logger: Logger
+}
+
+/** A registered provider: its defaults plus its handler factory. */
+export interface ProviderEntry {
+  defaultConfig: ProviderConfig
+  createHandler(deps: HandlerDeps, config: ProviderConfig): ProviderHandler
+}
+
+/**
+ * Handles one session.retry event: may rewrite `event.decision`; must never
+ * throw (the hook wrapper guards anyway) and must leave `decision` untouched
+ * whenever it has no provider-specific opinion.
+ */
+export type ProviderHandler = (event: RetryEvent) => void

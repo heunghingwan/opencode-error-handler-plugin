@@ -5,10 +5,28 @@
 // OpenCode maps every 429 to error.type "provider.rate-limit", so the only
 // way to tell quota exhaustion apart from a rate limit is parsing the body's
 // error.code. Reference: official error-code table at
-// https://docs.bigmodel.cn/cn/api/api-code
+// https://docs.bigmodel.cn/cn/api/api-code (summary below).
 //
-// This file currently holds the body/reset-time parsers; the retry decision
-// handler (createHandler/DEFAULT_CONFIG) is added by the wiring task.
+// 429 family, by behavior:
+//   1302                    account rate limit        → retry after 30s
+//   1305                    model overload            → OpenCode built-in
+//   1308, 1310, 1316–1321   quota windows, message carries the reset time
+//                                                    → segmented waiting
+//   1113, 1309, 1311,       fatal: retries cannot fix them, a human must act
+//   1313, 1314, 1315                                  → fail fast + notify
+//   everything else                                    → OpenCode built-in
+//
+// The 5-hour quota window (1308 and friends) is spanned by proportional
+// segments: 7 waiting segments × 45 min capacity ≥ the window, keeping 3
+// retry decisions in reserve for post-reset trouble. Weekly/monthly windows
+// (1310, 1317, 1319, 1321) exceed the span, so they fail fast with the reset
+// time in the notification. That is decided dynamically from the parsed
+// reset time, not hardcoded per code.
+
+import { maxSpanMs, segmentDelay, segmentsAvailable } from "../budget.ts"
+import type { Logger } from "../logger.ts"
+import { NotifyGate, type Notification } from "../notify.ts"
+import type { HandlerDeps, ProviderConfig, ProviderEntry, RetryEvent } from "../types.ts"
 
 export interface ParsedBody {
   readonly code: string
@@ -62,4 +80,133 @@ export function parseResetTime(message: string): ParsedResetTime | null {
   if (!inRange(h, 0, 23) || !inRange(mi, 0, 59) || !inRange(s, 0, 59)) return null
   const epoch = Date.UTC(y, mo - 1, d, h - 8, mi, s)
   return Number.isFinite(epoch) ? { raw, epoch } : null
+}
+
+// ---- Retry decision handler ----
+
+export const DEFAULT_CONFIG: ProviderConfig = {
+  enabled: true,
+  // The zhipuai coding plan has a reset card: quota exhaustion is actionable
+  // (reset now on the website), so notifications are on by default.
+  notify: true,
+  quota: { waitSegments: 7, reserve: 3, minSegmentMs: 60_000, maxSegmentMs: 2_700_000 },
+}
+
+const RATE_LIMIT_CODE = "1302"
+const RATE_LIMIT_DELAY_MS = 30_000
+const OVERLOAD_CODE = "1305"
+
+/** Quota-window codes: the message carries a reset time (next_flush_time). */
+const QUOTA_CODES = new Set(["1308", "1310", "1316", "1317", "1318", "1319", "1320", "1321"])
+
+/** Fatal codes: retrying cannot help; the hint says what a human should do. */
+const FATAL_HINTS: Record<string, string> = {
+  "1113": "帳戶欠費，請充值或更換為套餐 Key。",
+  "1309": "GLM Coding Plan 套餐已到期，請續訂。",
+  "1311": "套餐未開放該模型，請改用套餐內的模型。",
+  "1313": "觸發公平使用策略，請到個人中心申請解除限制。",
+  "1314": "企業套餐已失效，請聯絡企業管理員。",
+  "1315": "API Key 類型不符，請更換對應產品類型的 Key。",
+}
+
+/** Fatal notifications re-arm after an hour. */
+const FATAL_DEDUP_MS = 3_600_000
+
+function humanizeMs(ms: number): string {
+  const minutes = Math.round(ms / 60_000)
+  const days = Math.floor(minutes / 1440)
+  const hours = Math.floor((minutes % 1440) / 60)
+  const mins = minutes % 60
+  const parts: string[] = []
+  if (days > 0) parts.push(`${days} 天`)
+  if (hours > 0) parts.push(`${hours} 小時`)
+  if (mins > 0) parts.push(`${mins} 分`)
+  return parts.length > 0 ? parts.join(" ") : "不到 1 分鐘"
+}
+
+export const zhipuaiCodingPlan: ProviderEntry = {
+  defaultConfig: DEFAULT_CONFIG,
+  createHandler(deps: HandlerDeps, config: ProviderConfig) {
+    const gate = new NotifyGate()
+    const logger: Logger = deps.logger
+
+    // Fire-and-forget: never let notification trouble reach the retry path.
+    const fire = (n: Notification) => {
+      try {
+        void deps.send(n)
+      } catch (err) {
+        logger.debug("notification send threw synchronously", { error: String(err) })
+      }
+    }
+
+    return (event: RetryEvent) => {
+      const parsed = parseBody(event.error.response?.body)
+      if (!parsed) return // unparseable → built-in policy
+      const code = parsed.code
+
+      if (code === RATE_LIMIT_CODE) {
+        event.decision = { retry: true, delay: RATE_LIMIT_DELAY_MS }
+        return
+      }
+      if (code === OVERLOAD_CODE) return // built-in backoff is fine for overload
+
+      const fatalHint = FATAL_HINTS[code]
+      if (fatalHint !== undefined) {
+        event.decision = { retry: false }
+        if (config.notify && gate.allow(`fatal:${code}`, FATAL_DEDUP_MS, deps.now())) {
+          fire({
+            title: `⛔ 智譜請求被拒（${code}）`,
+            message: `${parsed.message}\n重試無法解決，已停止重試。${fatalHint}`,
+            priority: 5,
+          })
+        }
+        return
+      }
+
+      if (!QUOTA_CODES.has(code)) return // unknown code → built-in policy
+
+      const reset = parseResetTime(parsed.message)
+      if (!reset) return // quota code without a parseable reset → built-in
+
+      const remaining = reset.epoch - deps.now()
+      const segments = segmentsAvailable(event.attempt, config.quota)
+
+      if (segments <= 0) {
+        // Waiting budget spent, still quota-limited: give up fast.
+        event.decision = { retry: false }
+        if (config.notify && gate.allow(`terminal:${reset.raw}`, Infinity, deps.now())) {
+          fire({
+            title: `❌ 智譜額度未恢復（${code}）`,
+            message: `重試預算已用盡仍收到額度上限（${code}），已停止重試。額度重置時間：${reset.raw}。`,
+            priority: 5,
+          })
+        }
+        return
+      }
+
+      if (remaining > maxSpanMs(segments, config.quota)) {
+        // The window is beyond what the retry budget can span (weekly or
+        // monthly quota): fail fast and tell the user when it resets.
+        event.decision = { retry: false }
+        if (config.notify && gate.allow(`terminal:${reset.raw}`, Infinity, deps.now())) {
+          fire({
+            title: `❌ 智譜額度用盡（${code}，無法等待重置）`,
+            message: `距重置時間尚有 ${humanizeMs(remaining)}，超出可等待範圍（${segments} 段 × ${Math.round(config.quota.maxSegmentMs / 60_000)} 分鐘），已停止重試。重置時間：${reset.raw}。`,
+            priority: 5,
+          })
+        }
+        return
+      }
+
+      const delay = segmentDelay(remaining, segments, config.quota)
+      event.decision = { retry: true, delay }
+      if (config.notify && gate.allow(`quota:${reset.raw}`, Infinity, deps.now())) {
+        fire({
+          title: `⚠️ 智譜額度用盡（${code}）`,
+          message: `額度已用盡（錯誤碼 ${code}），將於 ${reset.raw}（UTC+8）重置。已排程分段等待與自動恢復：額度恢復後將自動繼續任務。`,
+          priority: 4,
+        })
+      }
+    }
+  },
 }
