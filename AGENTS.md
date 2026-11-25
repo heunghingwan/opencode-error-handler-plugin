@@ -37,4 +37,9 @@ opencode-error-handler-plugin/
 - 測試用 bun test（`test/`）
 - 用戶設定檔放 `~/.config/opencode/`，repo 內只放範本
 - 通知一律走 remote-notifier 的 RPC，本插件不自建通知系統
-- OpenCode 源碼參考：`/path/to/opencode-source`（hook／分類／重試源碼位置見文件）
+- OpenCode 源碼參考：`/path/to/opencode-source`
+  - 內建重試：`packages/core/src/model-retry.ts`
+  - retry hook 接線：`packages/core/src/session/runner/retry.ts`
+  - 錯誤分類：`packages/ai/src/provider-error.ts`
+  - hook 介面：`packages/plugin/src/promise/session.ts`
+  - 官方插件文件：`services/www/src/docs/content/build/plugins/`（server.mdx、rpc.mdx）
