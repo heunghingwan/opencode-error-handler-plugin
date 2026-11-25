@@ -1,0 +1,14 @@
+{
+  "providers": {
+    "zhipuai-coding-plan": {
+      "enabled": true,
+      "notify": true,
+      "quota": {
+        "waitSegments": 7,
+        "reserve": 3,
+        "minSegmentMs": 60000,
+        "maxSegmentMs": 2700000
+      }
+    }
+  }
+}
