@@ -1,0 +1,101 @@
+// File-based configuration: ~/.config/opencode/error-handler.json (strict
+// JSON; template in config.example.json at the repo root). Semantics:
+//
+//   file missing / unparsable → every registered provider runs at its own
+//                               defaults (zhipuai ships enabled)
+//   file present, provider unlisted → provider disabled
+//   file present, provider listed   → listed fields override the provider's
+//                               defaults, field by field
+//
+// The pattern mirrors opencode-remote-notifier-plugin's notifier.json.
+
+import fs from "node:fs"
+import path from "node:path"
+import type { Logger } from "./logger.ts"
+import type { ProviderConfig, QuotaConfig } from "./types.ts"
+
+export interface ResolvedConfig {
+  readonly providers: Record<string, ProviderConfig>
+}
+
+type Registry = Record<string, { defaultConfig: ProviderConfig }>
+
+const configPath = (): string => {
+  const homeDir = process.env.HOME || process.env.USERPROFILE || ""
+  return path.join(homeDir, ".config", "opencode", "error-handler.json")
+}
+
+/**
+ * Reads and JSON.parses the config file. Returns null when the file is
+ * missing or invalid (invalid files are logged; both yield the defaults).
+ */
+export function readConfigFile(logger: Logger, filePath: string = configPath()): unknown {
+  try {
+    const raw = fs.readFileSync(filePath, "utf-8")
+    return JSON.parse(raw)
+  } catch (err: any) {
+    if (err?.code !== "ENOENT") logger.error("Config parse error, using defaults", { message: err?.message ?? String(err) })
+    return null
+  }
+}
+
+const boolOr = (v: unknown, fallback: boolean): boolean => (typeof v === "boolean" ? v : fallback)
+
+// Range-checked numeric pick: bogus types AND out-of-range values both fall
+// back, so a typo'd config can never produce nonsense like negative segments.
+const numInRangeOr = (v: unknown, lo: number, fallback: number): number =>
+  typeof v === "number" && Number.isFinite(v) && v >= lo ? v : fallback
+
+function mergeQuota(user: unknown, fallback: QuotaConfig, logger: Logger): QuotaConfig {
+  const merged: QuotaConfig = { ...fallback }
+  if (typeof user === "object" && user !== null) {
+    const q = user as Record<string, unknown>
+    merged.waitSegments = numInRangeOr(q.waitSegments, 1, fallback.waitSegments)
+    merged.reserve = numInRangeOr(q.reserve, 0, fallback.reserve)
+    merged.minSegmentMs = numInRangeOr(q.minSegmentMs, 0, fallback.minSegmentMs)
+    merged.maxSegmentMs = numInRangeOr(q.maxSegmentMs, 1, fallback.maxSegmentMs)
+  }
+  if (merged.maxSegmentMs < merged.minSegmentMs) {
+    logger.warn("Config quota.maxSegmentMs < minSegmentMs, reverting both to defaults", {
+      minSegmentMs: merged.minSegmentMs,
+      maxSegmentMs: merged.maxSegmentMs,
+    })
+    merged.minSegmentMs = fallback.minSegmentMs
+    merged.maxSegmentMs = fallback.maxSegmentMs
+  }
+  return merged
+}
+
+function mergeProvider(user: unknown, fallback: ProviderConfig, logger: Logger): ProviderConfig {
+  if (typeof user !== "object" || user === null) return { ...fallback, quota: { ...fallback.quota } }
+  const p = user as Record<string, unknown>
+  return {
+    enabled: boolOr(p.enabled, fallback.enabled),
+    notify: boolOr(p.notify, fallback.notify),
+    quota: mergeQuota(p.quota, fallback.quota, logger),
+  }
+}
+
+/**
+ * Resolves the effective per-provider configuration from a parsed config
+ * file (`null` when absent/invalid) against the provider registry.
+ */
+export function resolveConfig(registry: Registry, file: unknown, logger: Logger): ResolvedConfig {
+  const providers: Record<string, ProviderConfig> = {}
+  if (file === null || file === undefined) {
+    for (const [id, entry] of Object.entries(registry)) {
+      providers[id] = { ...entry.defaultConfig, quota: { ...entry.defaultConfig.quota } }
+    }
+    return { providers }
+  }
+  const userProviders =
+    typeof file === "object" && file !== null && typeof (file as { providers?: unknown }).providers === "object"
+      ? ((file as { providers: Record<string, unknown> }).providers ?? {})
+      : {}
+  for (const [id, entry] of Object.entries(registry)) {
+    const user = userProviders[id]
+    if (user === undefined) continue // unlisted → not enabled
+    providers[id] = mergeProvider(user, entry.defaultConfig, logger)
+  }
+  return { providers }
+}
