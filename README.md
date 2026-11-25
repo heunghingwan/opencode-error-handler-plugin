@@ -19,7 +19,10 @@ RPC (switchable per provider).
   adding one file + one line in `src/registry.ts`.
 - Notifications go through remote-notifier's RPC and degrade silently when it
   is unavailable. Calls are fire-and-forget: notification trouble can never
-  slow down or break the retry decision path.
+  slow down or break the retry decision path. The RPC definition handed to
+  OpenCode must be complete (`events: {}` + per-method JSON Schemas) —
+  OpenCode compiles it eagerly, and an incomplete one throws inside
+  `ctx.rpc(...)` and silently drops every notification.
 
 ## Zhipu GLM Coding Plan (`zhipuai-coding-plan`)
 
@@ -31,11 +34,28 @@ the body as `{"error":{"code":"...","message":"..."}}`. OpenCode maps every
 
 | Codes | Meaning | Behavior |
 |---|---|---|
-| `1302` | account rate limit | retry after 30 s |
+| `1302` | account rate limit | provider-wide exponential backoff (below) |
 | `1305` | model overloaded | OpenCode built-in backoff |
 | `1308`, `1310`, `1316`–`1321` | quota window exhausted; the message carries a reset time (`next_flush_time`, Beijing time UTC+8) | segmented waiting (below) |
 | `1113`, `1309`, `1311`, `1313`, `1314`, `1315` | fatal — a human must act (recharge, renew, change key/model, lift a fair-use limit) | fail fast + notification with the actionable hint |
 | anything else | | OpenCode built-in (decision untouched) |
+
+### Rate-limit backoff (`1302`, provider-wide)
+
+A 429 rate limit is enforced against the *account*, not the session: N
+parallel sessions each retrying after a fixed 30 s still send N requests per
+interval and stay limited. So the 1302 backoff is **exponential and shared
+process-wide per provider** — every 1302 from any session (any project, any
+worktree) grows one sequence:
+
+- 30 s, 60 s, 120 s, 240 s, 480 s, then capped at 10 min
+  (`baseMs=30_000`, `maxMs=600_000`, doubling).
+- Ten quiet minutes without a 1302 (`decayAfterMs`) reset the sequence to
+  the base — the account was demonstrably no longer limited.
+- The level lives in a module-scope registry keyed by providerID: OpenCode
+  loads a plugin module once per server process, so all per-location
+  instances share it. It never notifies (transient — it recovers alone) and
+  is logged at info with the delay and backoff level.
 
 ### Quota segmented waiting
 
@@ -82,7 +102,8 @@ quota reset card.
     "zhipuai-coding-plan": {
       "enabled": true,
       "notify": true,
-      "quota": { "waitSegments": 7, "reserve": 3, "minSegmentMs": 60000, "maxSegmentMs": 2700000 }
+      "quota": { "waitSegments": 7, "reserve": 3, "minSegmentMs": 60000, "maxSegmentMs": 2700000 },
+      "rateLimit": { "baseMs": 30000, "maxMs": 600000, "decayAfterMs": 600000 }
     }
   }
 }
@@ -92,10 +113,13 @@ quota reset card.
   defaults (zhipuai enabled, notify on).
 - File present, provider unlisted → that provider is disabled.
 - Listed providers merge field-by-field over their defaults; bogus or
-  out-of-range values fall back (e.g. `maxSegmentMs < minSegmentMs` reverts
-  both).
+  out-of-range values fall back (e.g. `maxSegmentMs < minSegmentMs` or
+  `rateLimit.maxMs < baseMs` revert both).
 - `quota.waitSegments + quota.reserve` must stay within OpenCode's 10-retry
   budget to mean anything; the defaults (7+3) saturate it exactly.
+- `rateLimit` tunes the provider-wide 1302 backoff: first delay `baseMs`,
+  doubling up to `maxMs`, resetting to the base after `decayAfterMs` without
+  a rate limit.
 
 ## Loading (three stages)
 
@@ -116,7 +140,7 @@ work-in-progress retry plugin must never take effect by accident.
 
 ```bash
 bun install
-bun test        # 71 tests
+bun test        # 104 tests
 bun run typecheck
 ```
 

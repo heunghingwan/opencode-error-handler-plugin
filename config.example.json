@@ -8,6 +8,11 @@
         "reserve": 3,
         "minSegmentMs": 60000,
         "maxSegmentMs": 2700000
+      },
+      "rateLimit": {
+        "baseMs": 30000,
+        "maxMs": 600000,
+        "decayAfterMs": 600000
       }
     }
   }

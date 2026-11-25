@@ -37,12 +37,23 @@ export interface QuotaConfig {
   maxSegmentMs: number
 }
 
+/** Per-provider rate-limit ("too many requests") exponential backoff tuning. */
+export interface RateLimitConfig {
+  /** Delay for the first rate-limited request (level 0). */
+  baseMs: number
+  /** Ceiling of the exponential sequence. */
+  maxMs: number
+  /** Quiet period (no rate limits at all) after which the sequence resets to baseMs. */
+  decayAfterMs: number
+}
+
 /** Per-provider resolved configuration. */
 export interface ProviderConfig {
   enabled: boolean
   /** Push notifications for this provider's actionable errors. */
   notify: boolean
   quota: QuotaConfig
+  rateLimit: RateLimitConfig
 }
 
 // The provider contract: one file per provider under src/providers/, exported
@@ -65,6 +76,13 @@ export interface HandlerDeps {
   now(): number
   send: NotifySender
   logger: Logger
+  /**
+   * The providerID this handler was registered under. Rate-limit backoff
+   * state is shared process-wide per provider (see src/ratelimit.ts), and
+   * this key is what makes instances for different locations of the same
+   * provider share one sequence.
+   */
+  providerID: string
   /** Called when the provider schedules a quota wait for a session. The
    *  host uses it to log and to watch for recovery (retries that succeed
    *  leave no trace in OpenCode's database, so the plugin tracks them). */

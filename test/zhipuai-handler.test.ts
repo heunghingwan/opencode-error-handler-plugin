@@ -1,7 +1,7 @@
 import { describe, test, expect } from "bun:test"
 import { DEFAULT_CONFIG, zhipuaiCodingPlan } from "../src/providers/zhipuai-coding-plan.ts"
 import type { Notification, NotifySender } from "../src/notify.ts"
-import type { ProviderConfig, RetryEvent } from "../src/types.ts"
+import type { ProviderConfig, QuotaConfig, RateLimitConfig, RetryEvent } from "../src/types.ts"
 
 const silentLogger = {
   debug: () => {},
@@ -21,6 +21,14 @@ const body1308 = (reset: string) =>
   JSON.stringify({ error: { code: "1308", message: `已达到 5 小时的使用上限。您的限额将在 ${reset} 重置。` } })
 const body1316 = (reset: string) =>
   JSON.stringify({ error: { code: "1316", message: `已达到 5 小时使用上限。主账号余额不足，无法使用超额按量付费。您的限额将在 ${reset} 重置。` } })
+
+const body1302 = () =>
+  JSON.stringify({ error: { code: "1302", message: "您的账户已达到速率限制，请您控制请求频率" } })
+
+// Unique providerID per handler: the rate-limit backoff is shared globally
+// per provider key, so tests must not inherit each other's backoff level.
+let providerSeq = 0
+const freshProviderID = () => `test-zhipuai-${providerSeq++}`
 
 function ev(body: string | undefined, opts: Partial<RetryEvent> = {}): RetryEvent {
   const builtIn = { retry: true, delay: 4000 } as const
@@ -44,9 +52,20 @@ interface Harness {
   sent: Notification[]
   handle(event: RetryEvent): void
   now: number
+  providerID: string
 }
 
-function harness(config: Partial<ProviderConfig> = {}, now: number = NOW): Harness {
+/** Test-visible provider config: every field optional, nested sections mergeable. */
+type TestConfig = Partial<Omit<ProviderConfig, "quota" | "rateLimit">> & {
+  quota?: Partial<QuotaConfig>
+  rateLimit?: Partial<RateLimitConfig>
+}
+
+function harness(
+  config: TestConfig = {},
+  now: number = NOW,
+  providerID: string = freshProviderID(),
+): Harness {
   const sent: Notification[] = []
   const send: NotifySender = (n) => {
     sent.push(n)
@@ -56,19 +75,20 @@ function harness(config: Partial<ProviderConfig> = {}, now: number = NOW): Harne
     enabled: config.enabled ?? DEFAULT_CONFIG.enabled,
     notify: config.notify ?? DEFAULT_CONFIG.notify,
     quota: { ...DEFAULT_CONFIG.quota, ...config.quota },
+    rateLimit: { ...DEFAULT_CONFIG.rateLimit, ...config.rateLimit },
   }
   const handler = zhipuaiCodingPlan.createHandler(
-    { now: () => now, send, logger: silentLogger },
+    { now: () => now, send, logger: silentLogger, providerID },
     cfg,
   )
-  return { sent, handle: handler, now }
+  return { sent, handle: handler, now, providerID }
 }
 
 describe("decision table", () => {
-  test("1302 → retry after 30s, at any attempt", () => {
+  test("1302 → retry after the base delay at any attempt (fresh backoff)", () => {
     for (const attempt of [2, 5, 11]) {
       const h = harness()
-      const event = ev(JSON.stringify({ error: { code: "1302", message: "您的账户已达到速率限制，请您控制请求频率" } }), { attempt })
+      const event = ev(body1302(), { attempt })
       h.handle(event)
       expect(event.decision).toEqual({ retry: true, delay: 30_000 })
       expect(h.sent).toBeEmpty()
@@ -120,6 +140,74 @@ describe("decision table", () => {
     const original = event.decision
     h.handle(event)
     expect(event.decision).toBe(original)
+    expect(h.sent).toBeEmpty()
+  })
+})
+
+describe("1302 rate limit — provider-wide exponential backoff", () => {
+  // The backoff state lives in a process-global registry keyed by providerID,
+  // so consecutive 1302 events (across sessions AND handler instances — one
+  // per location) share one growing delay: this is what actually slows the
+  // aggregate request rate against the provider.
+  test("consecutive events double the delay from the base, capped", () => {
+    const h = harness()
+    const delays: number[] = []
+    let attempt = 2
+    for (let i = 0; i < 7; i++) {
+      const event = ev(body1302(), { attempt })
+      h.handle(event)
+      delays.push((event.decision as { retry: true; delay: number }).delay)
+      attempt++
+    }
+    expect(delays).toEqual([30_000, 60_000, 120_000, 240_000, 480_000, 600_000, 600_000])
+  })
+
+  test("the backoff is shared across handler instances of the same provider", () => {
+    const providerID = freshProviderID()
+    const a = harness({}, NOW, providerID)
+    const b = harness({}, NOW, providerID)
+    const first = ev(body1302())
+    a.handle(first)
+    expect(first.decision).toEqual({ retry: true, delay: 30_000 })
+    const second = ev(body1302(), { sessionID: "ses_2" })
+    b.handle(second)
+    expect(second.decision).toEqual({ retry: true, delay: 60_000 })
+    const third = ev(body1302(), { sessionID: "ses_3" })
+    a.handle(third)
+    expect(third.decision).toEqual({ retry: true, delay: 120_000 })
+  })
+
+  test("the level decays back to the base after a quiet period", () => {
+    let now = NOW
+    const h = harness({}, now)
+    let event = ev(body1302())
+    h.handle(event)
+    expect(event.decision).toEqual({ retry: true, delay: 30_000 })
+    event = ev(body1302())
+    h.handle(event)
+    expect(event.decision).toEqual({ retry: true, delay: 60_000 })
+    // 10 quiet minutes (decayAfterMs): the next 1302 restarts from the base.
+    now += DEFAULT_CONFIG.rateLimit.decayAfterMs
+    event = ev(body1302())
+    const h2 = harness({}, now, h.providerID)
+    h2.handle(event)
+    expect(event.decision).toEqual({ retry: true, delay: 30_000 })
+  })
+
+  test("rateLimit config overrides the sequence (base and cap)", () => {
+    const h = harness({ rateLimit: { baseMs: 5_000, maxMs: 20_000, decayAfterMs: 600_000 } })
+    const delays: number[] = []
+    for (let i = 0; i < 4; i++) {
+      const event = ev(body1302())
+      h.handle(event)
+      delays.push((event.decision as { retry: true; delay: number }).delay)
+    }
+    expect(delays).toEqual([5_000, 10_000, 20_000, 20_000])
+  })
+
+  test("no notification fires for rate limits (transient, recovers alone)", () => {
+    const h = harness()
+    for (let i = 0; i < 5; i++) h.handle(ev(body1302()))
     expect(h.sent).toBeEmpty()
   })
 })
@@ -219,7 +307,7 @@ describe("notification dedup", () => {
     let now = NOW
     const sent: Notification[] = []
     const handler = zhipuaiCodingPlan.createHandler(
-      { now: () => now, send: (n) => { sent.push(n); return true }, logger: silentLogger },
+      { now: () => now, send: (n) => { sent.push(n); return true }, logger: silentLogger, providerID: freshProviderID() },
       DEFAULT_CONFIG,
     )
     const body = JSON.stringify({ error: { code: "1309", message: "您的 GLM Coding Plan 套餐已到期，暂无法使用" } })
@@ -273,6 +361,7 @@ describe("robustness", () => {
           throw new Error("boom")
         },
         logger: silentLogger,
+        providerID: freshProviderID(),
       },
       DEFAULT_CONFIG,
     )
@@ -287,6 +376,7 @@ test("DEFAULT_CONFIG ships zhipuai enabled with notifications", () => {
     enabled: true,
     notify: true,
     quota: { waitSegments: 7, reserve: 3, minSegmentMs: 60_000, maxSegmentMs: 2_700_000 },
+    rateLimit: { baseMs: 30_000, maxMs: 600_000, decayAfterMs: 600_000 },
   })
 })
 
@@ -297,7 +387,7 @@ describe("notification delivery failures release the dedup window", () => {
     const sent: Notification[] = []
     let deliver = false
     const handler = zhipuaiCodingPlan.createHandler(
-      { now: () => NOW, send: (n) => { sent.push(n); return deliver }, logger: silentLogger },
+      { now: () => NOW, send: (n) => { sent.push(n); return deliver }, logger: silentLogger, providerID: freshProviderID() },
       DEFAULT_CONFIG,
     )
     const body = body1308(RESET_A)
@@ -327,6 +417,7 @@ describe("notification delivery failures release the dedup window", () => {
           return reject ? Promise.reject(new Error("rpc down")) : Promise.resolve(true)
         },
         logger: silentLogger,
+        providerID: freshProviderID(),
       },
       DEFAULT_CONFIG,
     )
@@ -355,6 +446,7 @@ describe("notification delivery failures release the dedup window", () => {
           return true
         },
         logger: silentLogger,
+        providerID: freshProviderID(),
       },
       DEFAULT_CONFIG,
     )
@@ -376,6 +468,7 @@ describe("notification delivery failures release the dedup window", () => {
         now: () => NOW,
         send: () => true,
         logger: silentLogger,
+        providerID: freshProviderID(),
         track: (sessionID, wait) => tracked.push([sessionID, wait]),
       },
       DEFAULT_CONFIG,

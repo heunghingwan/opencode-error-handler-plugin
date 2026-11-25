@@ -12,7 +12,7 @@
 import fs from "node:fs"
 import path from "node:path"
 import type { Logger } from "./logger.ts"
-import type { ProviderConfig, QuotaConfig } from "./types.ts"
+import type { ProviderConfig, QuotaConfig, RateLimitConfig } from "./types.ts"
 
 export interface ResolvedConfig {
   readonly providers: Record<string, ProviderConfig>
@@ -66,13 +66,33 @@ function mergeQuota(user: unknown, fallback: QuotaConfig, logger: Logger): Quota
   return merged
 }
 
+function mergeRateLimit(user: unknown, fallback: RateLimitConfig, logger: Logger): RateLimitConfig {
+  const merged: RateLimitConfig = { ...fallback }
+  if (typeof user === "object" && user !== null) {
+    const r = user as Record<string, unknown>
+    merged.baseMs = numInRangeOr(r.baseMs, 0, fallback.baseMs)
+    merged.maxMs = numInRangeOr(r.maxMs, 1, fallback.maxMs)
+    merged.decayAfterMs = numInRangeOr(r.decayAfterMs, 0, fallback.decayAfterMs)
+  }
+  if (merged.maxMs < merged.baseMs) {
+    logger.warn("Config rateLimit.maxMs < baseMs, reverting both to defaults", {
+      baseMs: merged.baseMs,
+      maxMs: merged.maxMs,
+    })
+    merged.baseMs = fallback.baseMs
+    merged.maxMs = fallback.maxMs
+  }
+  return merged
+}
+
 function mergeProvider(user: unknown, fallback: ProviderConfig, logger: Logger): ProviderConfig {
-  if (typeof user !== "object" || user === null) return { ...fallback, quota: { ...fallback.quota } }
+  if (typeof user !== "object" || user === null) return { ...fallback, quota: { ...fallback.quota }, rateLimit: { ...fallback.rateLimit } }
   const p = user as Record<string, unknown>
   return {
     enabled: boolOr(p.enabled, fallback.enabled),
     notify: boolOr(p.notify, fallback.notify),
     quota: mergeQuota(p.quota, fallback.quota, logger),
+    rateLimit: mergeRateLimit(p.rateLimit, fallback.rateLimit, logger),
   }
 }
 
@@ -84,7 +104,7 @@ export function resolveConfig(registry: Registry, file: unknown, logger: Logger)
   const providers: Record<string, ProviderConfig> = {}
   if (file === null || file === undefined) {
     for (const [id, entry] of Object.entries(registry)) {
-      providers[id] = { ...entry.defaultConfig, quota: { ...entry.defaultConfig.quota } }
+      providers[id] = { ...entry.defaultConfig, quota: { ...entry.defaultConfig.quota }, rateLimit: { ...entry.defaultConfig.rateLimit } }
     }
     return { providers }
   }

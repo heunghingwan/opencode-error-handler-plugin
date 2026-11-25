@@ -19,6 +19,7 @@ const REGISTRY: Record<string, { defaultConfig: ProviderConfig }> = {
       enabled: true,
       notify: true,
       quota: { waitSegments: 7, reserve: 3, minSegmentMs: 60_000, maxSegmentMs: 2_700_000 },
+      rateLimit: { baseMs: 30_000, maxMs: 600_000, decayAfterMs: 600_000 },
     },
   },
   "other-provider": {
@@ -26,6 +27,7 @@ const REGISTRY: Record<string, { defaultConfig: ProviderConfig }> = {
       enabled: true,
       notify: false,
       quota: { waitSegments: 4, reserve: 2, minSegmentMs: 30_000, maxSegmentMs: 600_000 },
+      rateLimit: { baseMs: 10_000, maxMs: 120_000, decayAfterMs: 300_000 },
     },
   },
 }
@@ -82,6 +84,7 @@ describe("resolveConfig", () => {
       enabled: true,
       notify: false,
       quota: { waitSegments: 4, reserve: 2, minSegmentMs: 30_000, maxSegmentMs: 600_000 },
+      rateLimit: { baseMs: 10_000, maxMs: 120_000, decayAfterMs: 300_000 },
     })
   })
 
@@ -95,6 +98,7 @@ describe("resolveConfig", () => {
       enabled: true,
       notify: false,
       quota: { waitSegments: 7, reserve: 3, minSegmentMs: 60_000, maxSegmentMs: 2_700_000 },
+      rateLimit: { baseMs: 30_000, maxMs: 600_000, decayAfterMs: 600_000 },
     })
   })
 
@@ -112,6 +116,32 @@ describe("resolveConfig", () => {
     })
   })
 
+  test("rateLimit merges per-field", () => {
+    const resolved = resolveConfig(
+      REGISTRY,
+      { providers: { "zhipuai-coding-plan": { rateLimit: { baseMs: 15_000, maxMs: 300_000 } } } },
+      silentLogger,
+    )
+    expect(resolved.providers["zhipuai-coding-plan"]?.rateLimit).toEqual({
+      baseMs: 15_000,
+      maxMs: 300_000,
+      decayAfterMs: 600_000,
+    })
+  })
+
+  test("rateLimit.maxMs below baseMs reverts both to defaults", () => {
+    const resolved = resolveConfig(
+      REGISTRY,
+      { providers: { "zhipuai-coding-plan": { rateLimit: { baseMs: 500_000, maxMs: 100_000 } } } },
+      silentLogger,
+    )
+    expect(resolved.providers["zhipuai-coding-plan"]?.rateLimit).toEqual({
+      baseMs: 30_000,
+      maxMs: 600_000,
+      decayAfterMs: 600_000,
+    })
+  })
+
   test("non-numeric or bogus-typed values fall back to defaults", () => {
     const resolved = resolveConfig(
       REGISTRY,
@@ -121,6 +151,7 @@ describe("resolveConfig", () => {
             enabled: "yes",
             notify: 0,
             quota: { waitSegments: -5, reserve: "3", minSegmentMs: Number.NaN, maxSegmentMs: 10 },
+            rateLimit: { baseMs: -1, maxMs: "600", decayAfterMs: Number.NaN },
           },
         },
       },
@@ -130,6 +161,7 @@ describe("resolveConfig", () => {
       enabled: true,
       notify: true,
       quota: { waitSegments: 7, reserve: 3, minSegmentMs: 60_000, maxSegmentMs: 2_700_000 },
+      rateLimit: { baseMs: 30_000, maxMs: 600_000, decayAfterMs: 600_000 },
     })
   })
 

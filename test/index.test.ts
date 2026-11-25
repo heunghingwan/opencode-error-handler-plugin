@@ -4,6 +4,7 @@ import os from "node:os"
 import path from "node:path"
 import pluginDefault, { createHookHandler, createRecoveryTracker } from "../src/index.ts"
 import { providerRegistry } from "../src/registry.ts"
+import { resetRateLimitBackoffs } from "../src/ratelimit.ts"
 import type { Notification } from "../src/notify.ts"
 import type { ProviderConfig, RetryEvent } from "../src/types.ts"
 
@@ -41,6 +42,10 @@ function ev(providerID: string, b: string | undefined, opts: Partial<RetryEvent>
 const ZHIPUAI: ProviderConfig = providerRegistry["zhipuai-coding-plan"]!.defaultConfig
 
 describe("createHookHandler", () => {
+  // The rate-limit backoff is a process-global keyed by providerID — reset
+  // it between tests so each sees a fresh sequence.
+  beforeEach(() => resetRateLimitBackoffs())
+
   test("dispatches by providerID and applies the provider decision", () => {
     const sent: Notification[] = []
     const handler = createHookHandler({
@@ -149,6 +154,7 @@ describe("Plugin.define wiring", () => {
     // Keep test runs out of the real plugin log.
     prevLog = process.env.ERROR_HANDLER_LOG
     process.env.ERROR_HANDLER_LOG = path.join(home, "error-handler.log")
+    resetRateLimitBackoffs()
   })
 
   afterEach(() => {

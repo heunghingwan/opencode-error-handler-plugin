@@ -40,7 +40,10 @@ export function createHookHandler(deps: HookDeps): (event: RetryEvent) => void {
     try {
       handlers.set(
         id,
-        entry.createHandler({ now: deps.now, send: deps.send, logger: deps.logger, track: deps.track }, cfg),
+        entry.createHandler(
+          { now: deps.now, send: deps.send, logger: deps.logger, providerID: id, track: deps.track },
+          cfg,
+        ),
       )
     } catch (err) {
       deps.logger.error("provider handler construction failed, provider skipped", {
@@ -133,7 +136,7 @@ export default Plugin.define({
       .filter(([, cfg]) => cfg.enabled)
       .map(([id]) => id)
     logger.info("plugin initialized", {
-      version: "0.2.0",
+      version: "0.3.0",
       enabledProviders: enabled,
       configLoaded: file !== null,
       location: ctx.location.directory,
