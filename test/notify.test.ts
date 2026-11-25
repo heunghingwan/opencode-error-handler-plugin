@@ -1,5 +1,5 @@
 import { describe, test, expect } from "bun:test"
-import { NotifyGate, createRpcSender, type Notification } from "../src/notify.ts"
+import { NotifyGate, createRpcSender, REMOTE_NOTIFIER_RPC, type Notification } from "../src/notify.ts"
 
 const silentLogger = {
   debug: () => {},
@@ -56,6 +56,39 @@ describe("createRpcSender", () => {
     const send = createRpcSender(rpc, silentLogger)
     await send({ title: "t", message: "m", priority: 4 })
     expect(sent).toEqual([{ title: "t", message: "m", priority: 4 }])
+  })
+
+  // OpenCode's RPC client compiles the definition with
+  // Object.entries(definition.events) and validates the method's output with
+  // the CALLER-side schema: a definition without `events: {}` (or without
+  // input/output schemas) makes every ctx.rpc(...) construction throw and
+  // silently drops every notification — the exact production bug this guards.
+  test("hands the RPC host a complete definition (events + method schemas)", async () => {
+    let seen: unknown
+    const rpc = (definition: unknown) => {
+      seen = definition
+      return { notify: async () => ({ sent: true }) }
+    }
+    const send = createRpcSender(rpc, silentLogger)
+    await send({ title: "t", message: "m" })
+    const def = seen as { id: unknown; events?: unknown; methods?: Record<string, { input?: unknown; output?: unknown }> }
+    expect(def.id).toBe("remote-notifier")
+    expect(typeof def.events).toBe("object")
+    expect(def.events).not.toBeNull()
+    const notify = def.methods?.notify
+    expect(typeof notify?.input).toBe("object")
+    expect(typeof notify?.output).toBe("object")
+  })
+
+  test("REMOTE_NOTIFIER_RPC mirrors the server-side contract (title/message in, sent out)", () => {
+    expect(REMOTE_NOTIFIER_RPC.events).toEqual({})
+    const notify = REMOTE_NOTIFIER_RPC.methods.notify
+    const input = notify.input as unknown as { required?: unknown; additionalProperties?: unknown }
+    const output = notify.output as unknown as { required?: unknown; properties?: Record<string, unknown> }
+    expect(input.required).toEqual(["title", "message"])
+    expect(input.additionalProperties).toBe(false)
+    expect(output.required).toEqual(["sent"])
+    expect(output.properties?.sent).toEqual({ type: "boolean" })
   })
 
   test("stays silent when rpc() throws synchronously", async () => {
