@@ -1,0 +1,30 @@
+{
+  "name": "opencode-error-handler-plugin",
+  "version": "0.1.0",
+  "description": "Per-provider API error handling for OpenCode v2: smart retry decisions, quota-aware segmented waiting, and RPC notifications",
+  "keywords": [
+    "opencode",
+    "opencode-v2",
+    "plugin",
+    "retry",
+    "error-handling"
+  ],
+  "license": "MIT",
+  "author": "Heung Hing Wan",
+  "type": "module",
+  "main": "src/index.ts",
+  "scripts": {
+    "test": "bun test",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@opencode/plugin": "^2.3.2"
+  },
+  "devDependencies": {
+    "@types/bun": "^1.3.3",
+    "@types/node": "^25.6.0"
+  },
+  "engines": {
+    "opencode": ">=2.0.21"
+  }
+}
