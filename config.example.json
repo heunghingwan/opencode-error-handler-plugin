@@ -7,7 +7,8 @@
         "waitSegments": 7,
         "reserve": 5,
         "minSegmentMs": 60000,
-        "maxSegmentMs": 3780000
+        "maxSegmentMs": 4680000,
+        "firstSegmentMs": 600000
       },
       "rateLimit": {
         "baseMs": 30000,

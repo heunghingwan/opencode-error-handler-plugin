@@ -54,6 +54,7 @@ function mergeQuota(user: unknown, fallback: QuotaConfig, logger: Logger): Quota
     merged.reserve = numInRangeOr(q.reserve, 0, fallback.reserve)
     merged.minSegmentMs = numInRangeOr(q.minSegmentMs, 0, fallback.minSegmentMs)
     merged.maxSegmentMs = numInRangeOr(q.maxSegmentMs, 1, fallback.maxSegmentMs)
+    merged.firstSegmentMs = numInRangeOr(q.firstSegmentMs, 0, fallback.firstSegmentMs)
   }
   if (merged.maxSegmentMs < merged.minSegmentMs) {
     logger.warn("Config quota.maxSegmentMs < minSegmentMs, reverting both to defaults", {

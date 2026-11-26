@@ -129,6 +129,36 @@ describe("resolveConfig", () => {
     })
   })
 
+  test("quota.firstSegmentMs merges with a range-checked fallback", () => {
+    const resolved = resolveConfig(
+      REGISTRY,
+      { providers: { "zhipuai-coding-plan": { quota: { firstSegmentMs: 300_000 } } } },
+      silentLogger,
+    )
+    expect(resolved.providers["zhipuai-coding-plan"]?.quota.firstSegmentMs).toBe(300_000)
+  })
+
+  test("bogus firstSegmentMs falls back; absent keeps the default", () => {
+    const resolved = resolveConfig(
+      REGISTRY,
+      { providers: { "zhipuai-coding-plan": { quota: { firstSegmentMs: -1 } } } },
+      silentLogger,
+    )
+    expect(resolved.providers["zhipuai-coding-plan"]?.quota.firstSegmentMs).toBe(600_000)
+    const resolved2 = resolveConfig(
+      REGISTRY,
+      { providers: { "zhipuai-coding-plan": { quota: { firstSegmentMs: "x" } } } },
+      silentLogger,
+    )
+    expect(resolved2.providers["zhipuai-coding-plan"]?.quota.firstSegmentMs).toBe(600_000)
+    const resolved3 = resolveConfig(
+      REGISTRY,
+      { providers: { "zhipuai-coding-plan": { quota: { waitSegments: 6 } } } },
+      silentLogger,
+    )
+    expect(resolved3.providers["zhipuai-coding-plan"]?.quota.firstSegmentMs).toBe(600_000)
+  })
+
   test("rateLimit merges per-field", () => {
     const resolved = resolveConfig(
       REGISTRY,
