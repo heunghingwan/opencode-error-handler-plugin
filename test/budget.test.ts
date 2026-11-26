@@ -132,6 +132,17 @@ describe("maxSpanMs first-aware", () => {
     expect(maxSpanMs(5, QUOTA, false)).toBe(13_500_000)
     expect(maxSpanMs(1, QUOTA, true)).toBe(2_700_000)
   })
+  test("cross-field misconfig: the first term is clamped like the actual first delay", () => {
+    // firstSegmentMs above maxSegmentMs: the real first delay clamps down
+    // to maxSegmentMs, so the span must not claim more than pacing delivers
+    // (an over-estimate would pass unreachable windows and fail late).
+    const over = { ...QUOTA, firstSegmentMs: 3_000_000 }
+    expect(maxSpanMs(5, over, true)).toBe(13_500_000)
+    // firstSegmentMs below minSegmentMs: the real first delay clamps up to
+    // minSegmentMs, so the span must not under-claim either.
+    const under = { ...QUOTA, firstSegmentMs: 10_000 }
+    expect(maxSpanMs(5, under, true)).toBe(60_000 + 4 * 2_700_000)
+  })
 })
 
 describe("FirstWaitRegistry", () => {

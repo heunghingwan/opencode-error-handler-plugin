@@ -60,11 +60,15 @@ export function segmentDelay(remainingMs: number, segments: number, quota: Quota
 }
 
 /** The longest window the given waiting segments can cover (first-aware:
- * the window-entry wait starts with the short first-probe cap). */
+ * the window-entry wait starts with the short first-probe cap). The first
+ * term is clamped exactly like the actual first delay — `segmentDelay`
+ * clamps min(firstSegmentMs, share) to [minSegmentMs, maxSegmentMs], so a
+ * cross-field misconfiguration must not make the estimate claim more (nor
+ * less) than the pacing can actually deliver. */
 export function maxSpanMs(segments: number, quota: QuotaConfig, first = false): number {
-  return first && segments >= 2
-    ? quota.firstSegmentMs + (segments - 1) * quota.maxSegmentMs
-    : segments * quota.maxSegmentMs
+  if (!first || segments < 2) return segments * quota.maxSegmentMs
+  const effectiveFirst = Math.min(quota.maxSegmentMs, Math.max(quota.minSegmentMs, quota.firstSegmentMs))
+  return effectiveFirst + (segments - 1) * quota.maxSegmentMs
 }
 
 /**

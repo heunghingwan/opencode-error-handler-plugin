@@ -195,7 +195,7 @@ work-in-progress retry plugin must never take effect by accident.
 
 ```bash
 bun install
-bun test        # 145 tests
+bun test        # 146 tests
 bun run typecheck
 ```
 
