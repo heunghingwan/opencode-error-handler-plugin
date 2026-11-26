@@ -15,7 +15,7 @@ import { Plugin } from "@opencode/plugin"
 import pkg from "../package.json"
 import { readConfigFile, resolveConfig } from "./config.ts"
 import { createFileLogger, type Logger } from "./logger.ts"
-import { createRpcSender, type Notification, type NotifySender } from "./notify.ts"
+import { createRpcSender, fireGated, sharedNotifyGate, type Notification, type NotifySender } from "./notify.ts"
 import { providerRegistry } from "./registry.ts"
 import type { ProviderConfig, ProviderHandler, RetryEvent, WaitScheduled } from "./types.ts"
 
@@ -80,6 +80,7 @@ export function createHookHandler(deps: HookDeps): (event: RetryEvent) => void {
 // successful turn end and logs the recovery itself.
 
 interface PendingWait {
+  readonly providerID: string
   readonly code: string
   readonly resetRaw: string
   readonly since: number
@@ -112,6 +113,7 @@ export function createRecoveryTracker(
     // want the total wait, not the time since the last segment.
     const since = pending.get(sessionID)?.since ?? now()
     pending.set(sessionID, {
+      providerID: wait.providerID,
       code: wait.code,
       resetRaw: wait.resetRaw,
       since,
@@ -119,26 +121,24 @@ export function createRecoveryTracker(
     })
   }
 
-  // Fire-and-forget like the provider handlers' sends: a lost recovery
-  // notification is low-stakes (the session visibly continues), so there is
-  // no dedup window to roll back — a failure is only logged.
-  const notifyRecovered = (sessionID: string, wait: PendingWait) => {
+  // One ✅ per quota window per provider, process-wide: the tracker (one
+  // per location, like every plugin instance) shares the provider's
+  // process-global gate with the handler instances, so parallel sessions
+  // recovering in the same window notify once — the first recovery closes
+  // the loop the ⚠️ opened. A failed send releases the window (the shared
+  // fireGated rollback), so a later recovery re-attempts; a lost recovery
+  // notification is low-stakes (the session visibly continues).
+  const notifyRecovered = (wait: PendingWait) => {
     if (send === undefined || wait.recoveredNotification === undefined) return
-    try {
-      const result = send(wait.recoveredNotification)
-      Promise.resolve(result).then(
-        (delivered) => {
-          if (delivered !== true) {
-            logger.debug("recovery notification not delivered", { session: sessionID })
-          }
-        },
-        (err) => {
-          logger.debug("recovery notification failed", { session: sessionID, error: String(err) })
-        },
-      )
-    } catch (err) {
-      logger.debug("recovery notification failed", { session: sessionID, error: String(err) })
-    }
+    fireGated(
+      sharedNotifyGate(wait.providerID),
+      `recovered:${wait.resetRaw}`,
+      Infinity,
+      now(),
+      send,
+      logger,
+      wait.recoveredNotification,
+    )
   }
 
   const handleEvent = (event: unknown) => {
@@ -156,7 +156,7 @@ export function createRecoveryTracker(
         resetAt: wait.resetRaw,
         waitedMs: now() - wait.since,
       })
-      notifyRecovered(sessionID, wait)
+      notifyRecovered(wait)
     } else if (type === "session.execution.failed") {
       // Quota may be back while something else failed; keep watching — the
       // next successful turn still counts as recovery.

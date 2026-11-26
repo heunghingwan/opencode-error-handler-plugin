@@ -1,5 +1,12 @@
-import { describe, test, expect } from "bun:test"
-import { NotifyGate, createRpcSender, REMOTE_NOTIFIER_RPC, type Notification } from "../src/notify.ts"
+import { describe, test, expect, beforeEach } from "bun:test"
+import {
+  NotifyGate,
+  createRpcSender,
+  REMOTE_NOTIFIER_RPC,
+  resetSharedNotifyGates,
+  sharedNotifyGate,
+  type Notification,
+} from "../src/notify.ts"
 
 const silentLogger = {
   debug: () => {},
@@ -42,6 +49,33 @@ describe("NotifyGate", () => {
     const gate = new NotifyGate()
     expect(gate.allow("k", Infinity)).toBe(true)
     expect(gate.allow("k", Infinity)).toBe(false)
+  })
+})
+
+describe("sharedNotifyGate (process-global, per provider)", () => {
+  beforeEach(() => resetSharedNotifyGates())
+
+  test("one gate per provider: repeated lookups return the same instance", () => {
+    expect(sharedNotifyGate("zhipuai-coding-plan")).toBe(sharedNotifyGate("zhipuai-coding-plan"))
+  })
+
+  test("distinct providers get distinct gates (their keys never collide)", () => {
+    expect(sharedNotifyGate("provider-a")).not.toBe(sharedNotifyGate("provider-b"))
+  })
+
+  test("the shared gate dedups across NotifyGate instances obtained separately", () => {
+    // The production shape: several plugin instances (one per OpenCode
+    // location) each look up their gate — they must dedup against each other.
+    const locationA = sharedNotifyGate("zhipuai-coding-plan")
+    const locationB = sharedNotifyGate("zhipuai-coding-plan")
+    expect(locationA.allow("quota:2026-11-27 01:32:08", Infinity, 1_000)).toBe(true)
+    expect(locationB.allow("quota:2026-11-27 01:32:08", Infinity, 2_000)).toBe(false)
+  })
+
+  test("resetSharedNotifyGates clears the registry (test isolation)", () => {
+    const first = sharedNotifyGate("p")
+    resetSharedNotifyGates()
+    expect(sharedNotifyGate("p")).not.toBe(first)
   })
 })
 

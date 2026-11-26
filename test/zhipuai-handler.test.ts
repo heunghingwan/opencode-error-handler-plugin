@@ -492,6 +492,47 @@ describe("notification dedup", () => {
     expect(h.sent).toHaveLength(1)
   })
 
+  test("one window notification across handler instances (OpenCode runs one plugin instance per location)", () => {
+    // Production evidence (2026-11-27): parallel sessions in three project
+    // locations hit the same account quota window and each location's
+    // handler instance re-announced it — three ⚠️ for one window. The dedup
+    // gate must live in module scope (process scope), like the rate-limit
+    // backoff, so every location's instance shares it.
+    const providerID = freshProviderID()
+    const locXuansi = harness({}, NOW, providerID)
+    const locYanshi = harness({}, NOW, providerID)
+    const locOpencode = harness({}, NOW, providerID)
+    locXuansi.handle(ev(body1308(RESET_A))) // first session in the window
+    locYanshi.handle(ev(body1308(RESET_A), { sessionID: "ses_yanshi" }))
+    locOpencode.handle(ev(body1308(RESET_A), { sessionID: "ses_opencode", attempt: 3 }))
+    expect(locXuansi.sent).toHaveLength(1)
+    expect(locYanshi.sent).toBeEmpty()
+    expect(locOpencode.sent).toBeEmpty()
+  })
+
+  test("a failing window notification in one location re-attempts from another", async () => {
+    // The rollback semantics survive the sharing: when location A's send
+    // fails, the released key lets location B's next event re-attempt.
+    const flush = () => new Promise<void>((r) => setTimeout(r, 0))
+    const providerID = freshProviderID()
+    const sent: Notification[] = []
+    let deliver = false
+    const make = () => {
+      const handler = zhipuaiCodingPlan.createHandler(
+        { now: () => NOW, send: (n) => { sent.push(n); return deliver }, logger: silentLogger, providerID },
+        DEFAULT_CONFIG,
+      )
+      return handler
+    }
+    make()(ev(body1308(RESET_A))) // attempted, not delivered → key released
+    await flush()
+    expect(sent).toHaveLength(1)
+    deliver = true
+    make()(ev(body1308(RESET_A), { sessionID: "ses_2" })) // fresh instance, re-attempt
+    await flush()
+    expect(sent).toHaveLength(2)
+  })
+
   test("a new reset window notifies again", () => {
     const h = harness()
     h.handle(ev(body1308(RESET_A)))
@@ -680,15 +721,16 @@ describe("notification delivery failures release the dedup window", () => {
   })
 
   test("tracks scheduled quota waits via deps.track", () => {
-    const tracked: Array<[string, { code: string; resetRaw: string; delayMs: number; recoveredNotification?: Notification }]> = []
+    const providerID = freshProviderID()
+    const tracked: Array<[string, { code: string; resetRaw: string; delayMs: number; providerID: string; recoveredNotification?: Notification }]> = []
     const handler = zhipuaiCodingPlan.createHandler(
       {
         now: () => NOW,
         send: () => true,
         logger: silentLogger,
-        providerID: freshProviderID(),
+        providerID,
         track: (sessionID, wait) =>
-          tracked.push([sessionID, { code: wait.code, resetRaw: wait.resetRaw, delayMs: wait.delayMs, recoveredNotification: wait.recoveredNotification }]),
+          tracked.push([sessionID, { code: wait.code, resetRaw: wait.resetRaw, delayMs: wait.delayMs, providerID: wait.providerID, recoveredNotification: wait.recoveredNotification }]),
       },
       DEFAULT_CONFIG,
     )
@@ -698,6 +740,9 @@ describe("notification delivery failures release the dedup window", () => {
     expect(tracked[0]![1].code).toBe("1308")
     expect(tracked[0]![1].resetRaw).toBe(RESET_A)
     expect(tracked[0]![1].delayMs).toBeGreaterThan(0)
+    // The wait record names its provider: the host's recovery-notification
+    // dedup is keyed per provider, shared across location instances.
+    expect(tracked[0]![1].providerID).toBe(providerID)
     // The recovery notification rides along for the tracker to fire on the
     // session's next successful turn.
     expect(tracked[0]![1].recoveredNotification?.title).toContain("已恢復")

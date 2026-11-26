@@ -1,6 +1,6 @@
 {
   "name": "opencode-error-handler-plugin",
-  "version": "0.7.1",
+  "version": "0.7.2",
   "description": "Per-provider API error handling for OpenCode v2: smart retry decisions, quota-aware segmented waiting, and RPC notifications",
   "keywords": [
     "opencode",

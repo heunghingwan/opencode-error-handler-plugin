@@ -101,6 +101,13 @@ export interface ProviderConfig {
 
 /** Details of a quota wait scheduled for a session, reported to the host. */
 export interface WaitScheduled {
+  /**
+   * The provider this wait belongs to. The host keys the recovery
+   * notification's process-global dedup gate per provider (notify.
+   * sharedNotifyGate): every location's tracker instance shares one gate,
+   * so N sessions recovering in the same window notify once.
+   */
+  readonly providerID: string
   readonly code: string
   /** Parsed reset time as epoch ms. */
   readonly resetAt: number

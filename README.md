@@ -114,8 +114,16 @@ schedulable retries. With the defaults, 5 decisions wait out the window and
 | quota window entered (waiting scheduled) | reset time + auto-recovery scheduled + reset-card hint | 4 | once per reset window (key: the parsed reset timestamp) |
 | quota still limited once the reset is due (final reserve probe scheduled) | quota did not recover | 5 | once per reset window |
 | quota window unreachable (weekly/monthly, or reset moved ahead) | too far to wait, reset time | 5 | once per reset window |
-| quota recovered (the session's next turn succeeds after a wait) | recovered, auto-resumed | 3 | once per tracked wait |
+| quota recovered (a waiting session's next turn succeeds) | recovered, auto-resumed | 3 | once per reset window |
 | fatal code | provider message + actionable hint | 5 | once per hour per code |
+
+Dedup is **process-global per provider**. OpenCode instantiates the plugin
+once per *location* (project directory), and parallel sessions in different
+locations share one account quota window — the dedup gates live in module
+scope so every location's instance shares them (same pattern as the
+rate-limit backoff). One quota window announces once and recovers once,
+however many sessions and locations are waiting on it. A server restart
+mid-window re-announces once.
 
 `notify: false` per provider turns all of this off — for providers whose
 errors have no remedy (no reset card, no renewal), a notification has no
@@ -195,7 +203,7 @@ work-in-progress retry plugin must never take effect by accident.
 
 ```bash
 bun install
-bun test        # 146 tests
+bun test        # 156 tests
 bun run typecheck
 ```
 

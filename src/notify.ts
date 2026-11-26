@@ -1,6 +1,17 @@
 // Notification delivery: a dedup gate plus the RPC call into the
 // remote-notifier plugin.
 //
+// OpenCode instantiates the plugin once per LOCATION (project directory) —
+// the hooks registry is per-location — while the module loads once per
+// server process (plain dynamic import; same reasoning as src/ratelimit.ts).
+// Per-instance gates therefore deduplicate nothing ACROSS locations, and
+// parallel sessions in different projects share one account quota window:
+// each location's instance re-announced it (2026-11-27: three locations →
+// three ⚠️ and two ✅ for one window). The gate lives in module scope —
+// process scope — keyed by provider, so every location's instance shares
+// it. A process restart mid-window re-fires once per restart: bounded, and
+// strictly better than the per-location multiplication it replaces.
+//
 // The remote-notifier plugin owns all notification transport; this plugin
 // never builds its own. The call goes through OpenCode's plugin RPC:
 //   ctx.rpc(definition).notify(input)     with input { title, message, priority? }
@@ -114,6 +125,64 @@ export class NotifyGate {
    */
   release(key: string): void {
     this.#sent.delete(key)
+  }
+}
+
+const sharedGates = new Map<string, NotifyGate>()
+
+/**
+ * The process-global dedup gate for one provider, shared by that provider's
+ * plugin instances — one per OpenCode location. The providerID keying keeps
+ * one provider's keys (`quota:…`, `recovered:…`) from ever colliding with
+ * another's.
+ */
+export function sharedNotifyGate(providerID: string, cap = 256): NotifyGate {
+  let gate = sharedGates.get(providerID)
+  if (gate === undefined) {
+    gate = new NotifyGate(cap)
+    sharedGates.set(providerID, gate)
+  }
+  return gate
+}
+
+/** Test hook: clears the shared gate registry. Production code never resets. */
+export function resetSharedNotifyGates(): void {
+  sharedGates.clear()
+}
+
+/**
+ * Fire-and-forget send behind a dedup gate, with rollback: a send that
+ * reports not-delivered (or throws) releases its key, so the next event
+ * re-attempts instead of losing the window's only notification. Never
+ * throws; notification trouble must never reach the retry path.
+ */
+export function fireGated(
+  gate: NotifyGate,
+  key: string,
+  windowMs: number,
+  now: number,
+  send: NotifySender,
+  logger: Logger,
+  n: Notification,
+): void {
+  if (!gate.allow(key, windowMs, now)) return
+  const release = (reason: unknown) => {
+    gate.release(key)
+    logger.debug("notification not delivered — dedup key released for the next retry event", {
+      key,
+      reason: String(reason),
+    })
+  }
+  try {
+    const result = send(n)
+    Promise.resolve(result).then(
+      (delivered) => {
+        if (delivered !== true) release("sender reported not delivered")
+      },
+      (err) => release(err),
+    )
+  } catch (err) {
+    release(err)
   }
 }
 

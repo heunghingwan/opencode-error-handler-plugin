@@ -34,7 +34,7 @@
 
 import { FirstWaitRegistry, decisionsRemaining, maxSpanMs, segmentDelay, segmentsAvailable } from "../budget.ts"
 import type { Logger } from "../logger.ts"
-import { NotifyGate, type Notification } from "../notify.ts"
+import { fireGated, sharedNotifyGate, type Notification } from "../notify.ts"
 import { rateLimitKey, sharedRateLimitBackoff, type BackoffDecision } from "../ratelimit.ts"
 import type { HandlerDeps, ProviderConfig, ProviderEntry, RetryEvent } from "../types.ts"
 
@@ -170,7 +170,11 @@ function humanizeMs(ms: number): string {
 export const zhipuaiCodingPlan: ProviderEntry = {
   defaultConfig: DEFAULT_CONFIG,
   createHandler(deps: HandlerDeps, config: ProviderConfig) {
-    const gate = new NotifyGate()
+    // Process-global per provider, NOT per handler instance: OpenCode runs
+    // one plugin instance per location, so an instance-local gate would let
+    // every parallel location re-announce the same account quota window
+    // (see notify.ts). Same sharing pattern as the rate-limit backoff.
+    const gate = sharedNotifyGate(deps.providerID)
     const firstWaits = new FirstWaitRegistry()
     const logger: Logger = deps.logger
 
@@ -179,32 +183,15 @@ export const zhipuaiCodingPlan: ProviderEntry = {
     // window — if the notifier RPC is unavailable (e.g. the notifier plugin
     // is mid-install/update), the next retry event re-attempts the
     // notification instead of losing it for the whole quota window.
-    const fireGated = (key: string, windowMs: number, n: Notification) => {
-      if (!gate.allow(key, windowMs, deps.now())) return
-      const release = (reason: unknown) => {
-        gate.release(key)
-        logger.debug("notification not delivered — dedup key released for the next retry event", {
-          key,
-          reason: String(reason),
-        })
-      }
-      try {
-        const result = deps.send(n)
-        Promise.resolve(result).then(
-          (delivered) => {
-            if (delivered !== true) release("sender reported not delivered")
-          },
-          (err) => release(err),
-        )
-      } catch (err) {
-        release(err)
-      }
-    }
+    const fire = (key: string, windowMs: number, n: Notification) =>
+      fireGated(gate, key, windowMs, deps.now(), deps.send, logger, n)
 
     // The recovery notification closes the loop on the ⚠️ window
     // announcement (and on the ❌ final-probe one): the host's recovery
-    // tracker fires it when the session's next turn succeeds. Attached to
-    // the wait record only while notifications are enabled.
+    // tracker fires it when a waiting session's next turn succeeds — once
+    // per reset window across every location (the tracker gates it
+    // process-wide; see index.ts). Attached to the wait record only while
+    // notifications are enabled.
     const recoveredNotification = (code: string, resetRaw: string): Notification => ({
       title: `✅ 智譜額度已恢復（${code}）`,
       message: `額度已於 ${resetRaw}（UTC+8）重置，會話已自動恢復並繼續任務。`,
@@ -261,7 +248,7 @@ export const zhipuaiCodingPlan: ProviderEntry = {
           message: parsed.message,
         })
         if (config.notify) {
-          fireGated(
+          fire(
             `fatal:${code}`,
             FATAL_DEDUP_MS,
             {
@@ -314,7 +301,7 @@ export const zhipuaiCodingPlan: ProviderEntry = {
             resetAt: reset.raw,
           })
           if (config.notify) {
-            fireGated(
+            fire(
               `terminal:${reset.raw}`,
               Infinity,
               {
@@ -335,6 +322,7 @@ export const zhipuaiCodingPlan: ProviderEntry = {
         const delay = config.quota.minSegmentMs
         event.decision = { retry: true, delay }
         deps.track?.(event.sessionID, {
+          providerID: deps.providerID,
           code,
           resetAt: reset.epoch,
           resetRaw: reset.raw,
@@ -352,7 +340,7 @@ export const zhipuaiCodingPlan: ProviderEntry = {
           finalProbe,
         })
         if (config.notify && finalProbe) {
-          fireGated(
+          fire(
             `terminal:${reset.raw}`,
             Infinity,
             {
@@ -378,7 +366,7 @@ export const zhipuaiCodingPlan: ProviderEntry = {
           resetAt: reset.raw,
         })
         if (config.notify) {
-          fireGated(
+          fire(
             `terminal:${reset.raw}`,
             Infinity,
             {
@@ -394,6 +382,7 @@ export const zhipuaiCodingPlan: ProviderEntry = {
       const delay = segmentDelay(remaining, segments, config.quota, first)
       event.decision = { retry: true, delay }
       deps.track?.(event.sessionID, {
+        providerID: deps.providerID,
         code,
         resetAt: reset.epoch,
         resetRaw: reset.raw,
@@ -412,7 +401,7 @@ export const zhipuaiCodingPlan: ProviderEntry = {
         resetAt: reset.raw,
       })
       if (config.notify) {
-        fireGated(
+        fire(
           `quota:${reset.raw}`,
           Infinity,
           {

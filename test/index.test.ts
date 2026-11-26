@@ -235,7 +235,14 @@ describe("Plugin.define wiring", () => {
 
 describe("createRecoveryTracker", () => {
   const NOW = Date.UTC(2026, 10, 26, 2, 0, 0)
-  const wait = { code: "1308", resetAt: NOW + 3_600_000, resetRaw: "2026-11-26 11:00:00", delayMs: 600_000, segments: 6 }
+  const wait = {
+    providerID: "recovery-shared",
+    code: "1308",
+    resetAt: NOW + 3_600_000,
+    resetRaw: "2026-11-26 11:00:00",
+    delayMs: 600_000,
+    segments: 6,
+  }
   const logs: Array<{ level: string; msg: string; extra?: Record<string, unknown> }> = []
   const logger = {
     debug: (msg: string, extra?: Record<string, unknown>) => logs.push({ level: "debug", msg, extra }),
@@ -300,6 +307,71 @@ describe("createRecoveryTracker", () => {
     expect(sent).toHaveLength(1)
     expect(sent[0]?.title).toContain("已恢復")
     expect(logs.some((l) => l.msg === "quota recovered — session resumed")).toBe(true)
+  })
+
+  test("one recovery notification per window: a second session recovering stays silent", () => {
+    // Production evidence (2026-11-27): two sessions waiting out the same
+    // quota window recovered two minutes apart and each fired its own ✅ —
+    // the recovery notification must dedup on the reset window (matching
+    // the ⚠️ window announcement), not per session. The audit log stays
+    // per session.
+    const sent: Notification[] = []
+    const t = createRecoveryTracker(() => now, logger, (n) => { sent.push(n); return true })
+    const recoveredNotification = { title: "✅ 智譜額度已恢復（1308）", message: "額度已於 2026-11-26 11:00:00（UTC+8）重置", priority: 3 }
+    t.track("ses_w1", { ...wait, providerID: "recovery-window", recoveredNotification })
+    t.track("ses_w2", { ...wait, providerID: "recovery-window", recoveredNotification })
+    t.handleEvent({ type: "session.execution.succeeded", data: { sessionID: "ses_w1" } })
+    t.handleEvent({ type: "session.execution.succeeded", data: { sessionID: "ses_w2" } })
+    expect(sent).toHaveLength(1)
+    expect(logs.filter((l) => l.msg === "quota recovered — session resumed")).toHaveLength(2)
+  })
+
+  test("one recovery notification per window across tracker instances (one per location)", () => {
+    // Each OpenCode location builds its own plugin instance — and therefore
+    // its own recovery tracker. A window deduped only inside one tracker
+    // still doubles when the recovering sessions live in different
+    // locations; the gate must be shared process-wide.
+    const sent: Notification[] = []
+    const locationA = createRecoveryTracker(() => now, logger, (n) => { sent.push(n); return true })
+    const locationB = createRecoveryTracker(() => now, logger, (n) => { sent.push(n); return true })
+    const recoveredNotification = { title: "✅ 智譜額度已恢復（1308）", message: "額度已於 2026-11-26 11:00:00（UTC+8）重置", priority: 3 }
+    locationA.track("ses_a", { ...wait, providerID: "recovery-xloc", recoveredNotification })
+    locationB.track("ses_b", { ...wait, providerID: "recovery-xloc", recoveredNotification })
+    locationA.handleEvent({ type: "session.execution.succeeded", data: { sessionID: "ses_a" } })
+    locationB.handleEvent({ type: "session.execution.succeeded", data: { sessionID: "ses_b" } })
+    expect(sent).toHaveLength(1)
+  })
+
+  test("an undelivered recovery notification re-attempts on a later recovery", async () => {
+    // The rollback semantics of the window announcement apply to the
+    // recovery notification too: a failed send must not consume the
+    // window's only ✅.
+    const flush = () => new Promise<void>((r) => setTimeout(r, 0))
+    const sent: Notification[] = []
+    let deliver = false
+    const t = createRecoveryTracker(() => now, logger, (n) => { sent.push(n); return deliver })
+    const recoveredNotification = { title: "✅ 智譜額度已恢復（1308）", message: "額度已於 2026-11-26 11:00:00（UTC+8）重置", priority: 3 }
+    t.track("ses_r1", { ...wait, providerID: "recovery-retry", recoveredNotification })
+    t.handleEvent({ type: "session.execution.succeeded", data: { sessionID: "ses_r1" } })
+    await flush()
+    expect(sent).toHaveLength(1) // attempted, not delivered → key released
+    t.track("ses_r2", { ...wait, providerID: "recovery-retry", recoveredNotification })
+    t.handleEvent({ type: "session.execution.succeeded", data: { sessionID: "ses_r2" } })
+    await flush()
+    expect(sent).toHaveLength(2) // re-attempted on the second recovery
+  })
+
+  test("distinct windows (distinct providers or reset times) each notify once", () => {
+    const sent: Notification[] = []
+    const t = createRecoveryTracker(() => now, logger, (n) => { sent.push(n); return true })
+    const recoveredNotification = { title: "✅ 恢復", message: "m", priority: 3 }
+    t.track("ses_d1", { ...wait, providerID: "recovery-distinct", recoveredNotification })
+    t.track("ses_d2", { ...wait, providerID: "recovery-other", recoveredNotification })
+    t.track("ses_d3", { ...wait, providerID: "recovery-distinct", resetRaw: "2026-11-26 15:00:00", recoveredNotification })
+    for (const s of ["ses_d1", "ses_d2", "ses_d3"]) {
+      t.handleEvent({ type: "session.execution.succeeded", data: { sessionID: s } })
+    }
+    expect(sent).toHaveLength(3)
   })
 
   test("no recovery notification when the wait carries none (notify off)", () => {
