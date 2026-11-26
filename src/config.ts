@@ -73,6 +73,7 @@ function mergeRateLimit(user: unknown, fallback: RateLimitConfig, logger: Logger
     merged.baseMs = numInRangeOr(r.baseMs, 0, fallback.baseMs)
     merged.maxMs = numInRangeOr(r.maxMs, 1, fallback.maxMs)
     merged.decayAfterMs = numInRangeOr(r.decayAfterMs, 0, fallback.decayAfterMs)
+    merged.factor = numInRangeOr(r.factor, 1, fallback.factor)
   }
   if (merged.maxMs < merged.baseMs) {
     logger.warn("Config rateLimit.maxMs < baseMs, reverting both to defaults", {

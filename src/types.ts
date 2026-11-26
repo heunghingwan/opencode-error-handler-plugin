@@ -45,6 +45,13 @@ export interface RateLimitConfig {
   maxMs: number
   /** Quiet period (no rate limits at all) after which the sequence resets to baseMs. */
   decayAfterMs: number
+  /**
+   * Multiplier per consecutive rate-limited request (>= 1). Agents spend
+   * most of their time running tools — a natural spacing — so the default
+   * (1.5) escalates gently and only sustained hammering climbs to maxMs.
+   * 2 restores classic doubling.
+   */
+  factor: number
 }
 
 /** Per-provider resolved configuration. */

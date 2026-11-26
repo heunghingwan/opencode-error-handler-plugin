@@ -94,9 +94,11 @@ export const DEFAULT_CONFIG: ProviderConfig = {
   // (reset now on the website), so notifications are on by default.
   notify: true,
   quota: { waitSegments: 7, reserve: 3, minSegmentMs: 60_000, maxSegmentMs: 2_700_000 },
-  // 1302 is account-wide: 30 s base doubling to a 10 min ceiling, shared by
-  // every session of this provider in the process (see src/ratelimit.ts).
-  rateLimit: { baseMs: 30_000, maxMs: 600_000, decayAfterMs: 600_000 },
+  // 1302 is account-wide: 30 s base growing ×1.5 to a 10 min ceiling, shared
+  // by every session of this provider in the process (see src/ratelimit.ts).
+  // Gentle on purpose: tool execution between requests already spaces them;
+  // only sustained hammering climbs the whole curve.
+  rateLimit: { baseMs: 30_000, maxMs: 600_000, decayAfterMs: 600_000, factor: 1.5 },
 }
 
 const RATE_LIMIT_CODE = "1302"

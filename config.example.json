@@ -12,7 +12,8 @@
       "rateLimit": {
         "baseMs": 30000,
         "maxMs": 600000,
-        "decayAfterMs": 600000
+        "decayAfterMs": 600000,
+        "factor": 1.5
       }
     }
   }

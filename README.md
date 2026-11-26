@@ -48,8 +48,14 @@ interval and stay limited. So the 1302 backoff is **exponential and shared
 process-wide per provider** — every 1302 from any session (any project, any
 worktree) grows one sequence:
 
-- 30 s, 60 s, 120 s, 240 s, 480 s, then capped at 10 min
-  (`baseMs=30_000`, `maxMs=600_000`, doubling).
+- 30 s ×1.5 per consecutive rate limit: 30 s, 45 s, 68 s, 101 s, 152 s,
+  228 s, 342 s, 513 s, then capped at 10 min
+  (`baseMs=30_000`, `factor=1.5`, `maxMs=600_000`).
+- The curve is gentle on purpose: agents spend most of their wall-clock
+  running tools, which already spaces requests apart — so five sessions
+  hitting the limit in the same burst stagger to 30/45/68/101/152 s, and
+  only *sustained* limiting (a hammering loop with no tool time) climbs to
+  the cap. `factor: 2` restores classic doubling if you want it harsher.
 - Ten quiet minutes without a 1302 (`decayAfterMs`) reset the sequence to
   the base — the account was demonstrably no longer limited.
 - The level lives in a module-scope registry keyed by providerID: OpenCode
@@ -103,7 +109,7 @@ quota reset card.
       "enabled": true,
       "notify": true,
       "quota": { "waitSegments": 7, "reserve": 3, "minSegmentMs": 60000, "maxSegmentMs": 2700000 },
-      "rateLimit": { "baseMs": 30000, "maxMs": 600000, "decayAfterMs": 600000 }
+      "rateLimit": { "baseMs": 30000, "factor": 1.5, "maxMs": 600000, "decayAfterMs": 600000 }
     }
   }
 }
@@ -118,8 +124,8 @@ quota reset card.
 - `quota.waitSegments + quota.reserve` must stay within OpenCode's 10-retry
   budget to mean anything; the defaults (7+3) saturate it exactly.
 - `rateLimit` tunes the provider-wide 1302 backoff: first delay `baseMs`,
-  doubling up to `maxMs`, resetting to the base after `decayAfterMs` without
-  a rate limit.
+  multiplied by `factor` (≥ 1, default 1.5) per consecutive rate limit up to
+  `maxMs`, resetting to the base after `decayAfterMs` without a rate limit.
 
 ## Loading (three stages)
 
@@ -140,7 +146,7 @@ work-in-progress retry plugin must never take effect by accident.
 
 ```bash
 bun install
-bun test        # 104 tests
+bun test        # 106 tests
 bun run typecheck
 ```
 

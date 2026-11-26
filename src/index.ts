@@ -136,7 +136,7 @@ export default Plugin.define({
       .filter(([, cfg]) => cfg.enabled)
       .map(([id]) => id)
     logger.info("plugin initialized", {
-      version: "0.3.0",
+      version: "0.4.0",
       enabledProviders: enabled,
       configLoaded: file !== null,
       location: ctx.location.directory,

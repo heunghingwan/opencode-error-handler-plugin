@@ -149,17 +149,17 @@ describe("1302 rate limit — provider-wide exponential backoff", () => {
   // so consecutive 1302 events (across sessions AND handler instances — one
   // per location) share one growing delay: this is what actually slows the
   // aggregate request rate against the provider.
-  test("consecutive events double the delay from the base, capped", () => {
+  test("consecutive events grow the delay by factor, capped", () => {
     const h = harness()
     const delays: number[] = []
     let attempt = 2
-    for (let i = 0; i < 7; i++) {
+    for (let i = 0; i < 8; i++) {
       const event = ev(body1302(), { attempt })
       h.handle(event)
       delays.push((event.decision as { retry: true; delay: number }).delay)
       attempt++
     }
-    expect(delays).toEqual([30_000, 60_000, 120_000, 240_000, 480_000, 600_000, 600_000])
+    expect(delays).toEqual([30_000, 45_000, 68_000, 101_000, 152_000, 228_000, 342_000, 513_000])
   })
 
   test("the backoff is shared across handler instances of the same provider", () => {
@@ -171,10 +171,10 @@ describe("1302 rate limit — provider-wide exponential backoff", () => {
     expect(first.decision).toEqual({ retry: true, delay: 30_000 })
     const second = ev(body1302(), { sessionID: "ses_2" })
     b.handle(second)
-    expect(second.decision).toEqual({ retry: true, delay: 60_000 })
+    expect(second.decision).toEqual({ retry: true, delay: 45_000 })
     const third = ev(body1302(), { sessionID: "ses_3" })
     a.handle(third)
-    expect(third.decision).toEqual({ retry: true, delay: 120_000 })
+    expect(third.decision).toEqual({ retry: true, delay: 68_000 })
   })
 
   test("the level decays back to the base after a quiet period", () => {
@@ -185,7 +185,7 @@ describe("1302 rate limit — provider-wide exponential backoff", () => {
     expect(event.decision).toEqual({ retry: true, delay: 30_000 })
     event = ev(body1302())
     h.handle(event)
-    expect(event.decision).toEqual({ retry: true, delay: 60_000 })
+    expect(event.decision).toEqual({ retry: true, delay: 45_000 })
     // 10 quiet minutes (decayAfterMs): the next 1302 restarts from the base.
     now += DEFAULT_CONFIG.rateLimit.decayAfterMs
     event = ev(body1302())
@@ -194,8 +194,8 @@ describe("1302 rate limit — provider-wide exponential backoff", () => {
     expect(event.decision).toEqual({ retry: true, delay: 30_000 })
   })
 
-  test("rateLimit config overrides the sequence (base and cap)", () => {
-    const h = harness({ rateLimit: { baseMs: 5_000, maxMs: 20_000, decayAfterMs: 600_000 } })
+  test("rateLimit config overrides the sequence (base, factor, cap)", () => {
+    const h = harness({ rateLimit: { baseMs: 5_000, maxMs: 20_000, factor: 2 } })
     const delays: number[] = []
     for (let i = 0; i < 4; i++) {
       const event = ev(body1302())
@@ -376,7 +376,7 @@ test("DEFAULT_CONFIG ships zhipuai enabled with notifications", () => {
     enabled: true,
     notify: true,
     quota: { waitSegments: 7, reserve: 3, minSegmentMs: 60_000, maxSegmentMs: 2_700_000 },
-    rateLimit: { baseMs: 30_000, maxMs: 600_000, decayAfterMs: 600_000 },
+    rateLimit: { baseMs: 30_000, maxMs: 600_000, decayAfterMs: 600_000, factor: 1.5 },
   })
 })
 
