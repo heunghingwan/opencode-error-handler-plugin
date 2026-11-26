@@ -37,6 +37,21 @@ export interface QuotaConfig {
   maxSegmentMs: number
 }
 
+/**
+ * Per-model rate-limit tuning, merged over the provider-level values: each
+ * defined field overrides, the rest inherit. Keys are model ids.
+ */
+export interface RateLimitOverride {
+  /** Delay for the first rate-limited request (level 0). */
+  baseMs?: number
+  /** Ceiling of the model's exponential sequence. */
+  maxMs?: number
+  /** Quiet period after which the model's sequence resets to its base. */
+  decayAfterMs?: number
+  /** Multiplier per consecutive rate-limited request (>= 1). */
+  factor?: number
+}
+
 /** Per-provider rate-limit ("too many requests") exponential backoff tuning. */
 export interface RateLimitConfig {
   /** Delay for the first rate-limited request (level 0). */
@@ -52,6 +67,11 @@ export interface RateLimitConfig {
    * 2 restores classic doubling.
    */
   factor: number
+  /**
+   * Per-model overrides (limits are per model; e.g. flash models ship with
+   * a more lenient base). Merged over the fields above.
+   */
+  models?: Record<string, RateLimitOverride>
 }
 
 /** Per-provider resolved configuration. */

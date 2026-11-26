@@ -98,8 +98,15 @@ export const DEFAULT_CONFIG: ProviderConfig = {
   // to a 10 min ceiling, shared by every session of the same provider+model
   // in the process (see src/ratelimit.ts). Gentle on purpose: tool
   // execution between requests already spaces them; only sustained
-  // hammering climbs the whole curve.
-  rateLimit: { baseMs: 30_000, maxMs: 600_000, decayAfterMs: 600_000, factor: 1.5 },
+  // hammering climbs the whole curve. Flash models have far higher limits —
+  // they ship with a more lenient base.
+  rateLimit: {
+    baseMs: 30_000,
+    maxMs: 600_000,
+    decayAfterMs: 600_000,
+    factor: 1.5,
+    models: { "glm-5.3-flash": { baseMs: 15_000 } },
+  },
 }
 
 const RATE_LIMIT_CODE = "1302"
@@ -183,12 +190,14 @@ export const zhipuaiCodingPlan: ProviderEntry = {
         // sessions and locations of this provider+model — N parallel
         // sessions each waiting a fixed delay would keep the model limited;
         // one growing sequence is what actually slows the request rate. The
-        // lookup is per event because the model is per event.
-        const rateLimitBackoff = sharedRateLimitBackoff(
+        // lookup is per event because the model is per event, and a
+        // models{} override retunes this model's curve.
+        const override = config.rateLimit.models?.[event.model.id]
+        const rateLimit = override === undefined ? config.rateLimit : { ...config.rateLimit, ...override }
+        const backoff: BackoffDecision = sharedRateLimitBackoff(
           rateLimitKey(deps.providerID, event.model.id),
-          config.rateLimit,
-        )
-        const backoff: BackoffDecision = rateLimitBackoff.next(deps.now())
+          rateLimit,
+        ).next(deps.now())
         event.decision = { retry: true, delay: backoff.delayMs }
         logger.info("rate limit — provider-wide exponential backoff", {
           session: event.sessionID,

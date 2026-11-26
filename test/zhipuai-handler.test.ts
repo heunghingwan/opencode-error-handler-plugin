@@ -192,7 +192,34 @@ describe("1302 rate limit — provider-wide exponential backoff", () => {
       model: { providerID: "zhipuai-coding-plan", id: "glm-5.3-flash" },
     })
     h.handle(flash)
-    expect(flash.decision).toEqual({ retry: true, delay: 30_000 })
+    // flash ships a more lenient default: base 15 s instead of 30 s
+    expect(flash.decision).toEqual({ retry: true, delay: 15_000 })
+  })
+
+  test("flash backoff grows from its own (lenient) base", () => {
+    const h = harness()
+    const delays: number[] = []
+    for (let i = 0; i < 4; i++) {
+      const event = ev(body1302(), {
+        sessionID: "ses_title",
+        model: { providerID: "zhipuai-coding-plan", id: "glm-5.3-flash" },
+      })
+      h.handle(event)
+      delays.push((event.decision as { retry: true; delay: number }).delay)
+    }
+    expect(delays).toEqual([15_000, 23_000, 34_000, 51_000])
+  })
+
+  test("a models override retunes one model without touching others", () => {
+    const h = harness({ rateLimit: { models: { "glm-5.3-flash": { baseMs: 5_000 } } } })
+    const flash = ev(body1302(), {
+      model: { providerID: "zhipuai-coding-plan", id: "glm-5.3-flash" },
+    })
+    h.handle(flash)
+    expect(flash.decision).toEqual({ retry: true, delay: 5_000 })
+    const main = ev(body1302())
+    h.handle(main)
+    expect(main.decision).toEqual({ retry: true, delay: 30_000 })
   })
 
   test("the level decays back to the base after a quiet period", () => {
@@ -394,7 +421,13 @@ test("DEFAULT_CONFIG ships zhipuai enabled with notifications", () => {
     enabled: true,
     notify: true,
     quota: { waitSegments: 7, reserve: 3, minSegmentMs: 60_000, maxSegmentMs: 2_700_000 },
-    rateLimit: { baseMs: 30_000, maxMs: 600_000, decayAfterMs: 600_000, factor: 1.5 },
+    rateLimit: {
+      baseMs: 30_000,
+      maxMs: 600_000,
+      decayAfterMs: 600_000,
+      factor: 1.5,
+      models: { "glm-5.3-flash": { baseMs: 15_000 } },
+    },
   })
 })
 

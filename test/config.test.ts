@@ -19,7 +19,13 @@ const REGISTRY: Record<string, { defaultConfig: ProviderConfig }> = {
       enabled: true,
       notify: true,
       quota: { waitSegments: 7, reserve: 3, minSegmentMs: 60_000, maxSegmentMs: 2_700_000 },
-      rateLimit: { baseMs: 30_000, maxMs: 600_000, decayAfterMs: 600_000, factor: 1.5 },
+      rateLimit: {
+        baseMs: 30_000,
+        maxMs: 600_000,
+        decayAfterMs: 600_000,
+        factor: 1.5,
+        models: { "glm-5.3-flash": { baseMs: 15_000 } },
+      },
     },
   },
   "other-provider": {
@@ -98,7 +104,13 @@ describe("resolveConfig", () => {
       enabled: true,
       notify: false,
       quota: { waitSegments: 7, reserve: 3, minSegmentMs: 60_000, maxSegmentMs: 2_700_000 },
-      rateLimit: { baseMs: 30_000, maxMs: 600_000, decayAfterMs: 600_000, factor: 1.5 },
+      rateLimit: {
+        baseMs: 30_000,
+        maxMs: 600_000,
+        decayAfterMs: 600_000,
+        factor: 1.5,
+        models: { "glm-5.3-flash": { baseMs: 15_000 } },
+      },
     })
   })
 
@@ -127,6 +139,60 @@ describe("resolveConfig", () => {
       maxMs: 300_000,
       decayAfterMs: 600_000,
       factor: 2,
+      models: { "glm-5.3-flash": { baseMs: 15_000 } },
+    })
+  })
+
+  test("rateLimit.models merges per-model over the shipped overrides", () => {
+    const resolved = resolveConfig(
+      REGISTRY,
+      {
+        providers: {
+          "zhipuai-coding-plan": {
+            rateLimit: {
+              models: {
+                "glm-5.3-flash": { factor: 2 },
+                "glm-5.3": { baseMs: 20_000 },
+              },
+            },
+          },
+        },
+      },
+      silentLogger,
+    )
+    expect(resolved.providers["zhipuai-coding-plan"]?.rateLimit.models).toEqual({
+      // existing override keeps unset fields (baseMs) and takes the new factor
+      "glm-5.3-flash": { baseMs: 15_000, factor: 2 },
+      // a brand-new model entry appears alongside the shipped one
+      "glm-5.3": { baseMs: 20_000 },
+    })
+  })
+
+  test("bogus per-model override values keep the shipped fields", () => {
+    const resolved = resolveConfig(
+      REGISTRY,
+      {
+        providers: {
+          "zhipuai-coding-plan": {
+            rateLimit: { models: { "glm-5.3-flash": { baseMs: "fast", factor: 0.5 } } },
+          },
+        },
+      },
+      silentLogger,
+    )
+    expect(resolved.providers["zhipuai-coding-plan"]?.rateLimit.models).toEqual({
+      "glm-5.3-flash": { baseMs: 15_000 },
+    })
+  })
+
+  test("a bogus models map is ignored", () => {
+    const resolved = resolveConfig(
+      REGISTRY,
+      { providers: { "zhipuai-coding-plan": { rateLimit: { models: "nope" } } } },
+      silentLogger,
+    )
+    expect(resolved.providers["zhipuai-coding-plan"]?.rateLimit.models).toEqual({
+      "glm-5.3-flash": { baseMs: 15_000 },
     })
   })
 
@@ -141,6 +207,7 @@ describe("resolveConfig", () => {
       maxMs: 600_000,
       decayAfterMs: 600_000,
       factor: 1.5,
+      models: { "glm-5.3-flash": { baseMs: 15_000 } },
     })
   })
 
@@ -163,7 +230,13 @@ describe("resolveConfig", () => {
       enabled: true,
       notify: true,
       quota: { waitSegments: 7, reserve: 3, minSegmentMs: 60_000, maxSegmentMs: 2_700_000 },
-      rateLimit: { baseMs: 30_000, maxMs: 600_000, decayAfterMs: 600_000, factor: 1.5 },
+      rateLimit: {
+        baseMs: 30_000,
+        maxMs: 600_000,
+        decayAfterMs: 600_000,
+        factor: 1.5,
+        models: { "glm-5.3-flash": { baseMs: 15_000 } },
+      },
     })
   })
 

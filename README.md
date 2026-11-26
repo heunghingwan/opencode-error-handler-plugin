@@ -53,6 +53,9 @@ model grows one sequence, while a limited `glm-5.3` never slows
 - 30 s ×1.5 per consecutive rate limit: 30 s, 45 s, 68 s, 101 s, 152 s,
   228 s, 342 s, 513 s, then capped at 10 min
   (`baseMs=30_000`, `factor=1.5`, `maxMs=600_000`).
+- `glm-5.3-flash` ships with a more lenient base (15 s — flash models have
+  far higher concurrency caps); its sequence grows 15 s, 23 s, 34 s, …
+  Any model can be retuned via `rateLimit.models`.
 - The curve is gentle on purpose: agents spend most of their wall-clock
   running tools, which already spaces requests apart — so five sessions
   hitting the limit in the same burst stagger to 30/45/68/101/152 s, and
@@ -130,6 +133,19 @@ quota reset card.
   first delay `baseMs`, multiplied by `factor` (≥ 1, default 1.5) per
   consecutive rate limit up to `maxMs`, resetting to the base after
   `decayAfterMs` without a rate limit.
+- `rateLimit.models` overrides any subset of those fields per model id,
+  merged over the provider-level values (and over the shipped
+  `glm-5.3-flash` base of 15 s):
+
+  ```json
+  "rateLimit": {
+    "baseMs": 30000,
+    "factor": 1.5,
+    "maxMs": 600000,
+    "decayAfterMs": 600000,
+    "models": { "glm-5.3-flash": { "baseMs": 15000 }, "glm-5.3": { "factor": 2 } }
+  }
+  ```
 
 ## Loading (three stages)
 
@@ -150,7 +166,7 @@ work-in-progress retry plugin must never take effect by accident.
 
 ```bash
 bun install
-bun test        # 108 tests
+bun test        # 113 tests
 bun run typecheck
 ```
 

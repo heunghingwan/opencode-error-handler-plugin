@@ -12,7 +12,7 @@
 import fs from "node:fs"
 import path from "node:path"
 import type { Logger } from "./logger.ts"
-import type { ProviderConfig, QuotaConfig, RateLimitConfig } from "./types.ts"
+import type { ProviderConfig, QuotaConfig, RateLimitConfig, RateLimitOverride } from "./types.ts"
 
 export interface ResolvedConfig {
   readonly providers: Record<string, ProviderConfig>
@@ -74,6 +74,24 @@ function mergeRateLimit(user: unknown, fallback: RateLimitConfig, logger: Logger
     merged.maxMs = numInRangeOr(r.maxMs, 1, fallback.maxMs)
     merged.decayAfterMs = numInRangeOr(r.decayAfterMs, 0, fallback.decayAfterMs)
     merged.factor = numInRangeOr(r.factor, 1, fallback.factor)
+    // Per-model overrides merge over the shipped ones, field by field; a
+    // bogus value keeps the shipped field (same fallback philosophy).
+    if (typeof r.models === "object" && r.models !== null) {
+      const models: Record<string, RateLimitOverride> = { ...(fallback.models ?? {}) }
+      for (const [modelID, override] of Object.entries(r.models as Record<string, unknown>)) {
+        if (typeof override !== "object" || override === null) continue
+        const o = override as Record<string, unknown>
+        const m: RateLimitOverride = { ...(models[modelID] ?? {}) }
+        const valid = (v: unknown, lo: number): v is number =>
+          typeof v === "number" && Number.isFinite(v) && v >= lo
+        if (valid(o.baseMs, 0)) m.baseMs = o.baseMs
+        if (valid(o.maxMs, 1)) m.maxMs = o.maxMs
+        if (valid(o.decayAfterMs, 0)) m.decayAfterMs = o.decayAfterMs
+        if (valid(o.factor, 1)) m.factor = o.factor
+        models[modelID] = m
+      }
+      merged.models = models
+    }
   }
   if (merged.maxMs < merged.baseMs) {
     logger.warn("Config rateLimit.maxMs < baseMs, reverting both to defaults", {
