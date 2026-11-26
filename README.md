@@ -77,10 +77,15 @@ sees the upcoming attempt number `A` (first failure → `A=2`), leaving `12-A`
 schedulable retries. With the defaults, 5 decisions wait out the window and
 5 are held in reserve.
 
+- A session's **first wait in a window is a short probe** capped at
+  `firstSegmentMs` (10 min by default): the coding plan's quota reset card
+  recovers the quota at once, so a user who plays it right after the ⚠️
+  notification gets auto-recovery at the first probe. The ⚠️ copy says so.
 - Waiting segments: `12 − A − reserve`, capped at `waitSegments` (default:
   5 usable segments with `reserve=5`). Proportional pacing: each segment
   sleeps `time-until-reset / segments-still-available`, clamped to
-  `[minSegmentMs, maxSegmentMs]` (60 s … 63 min by default). Every wake-up
+  `[minSegmentMs, maxSegmentMs]` (60 s … 78 min by default; a 5-hour window
+  hit at entry paces 10 → ~73 → ~73 → ~72 → 73 min). Every wake-up
   makes a real API call, so recovery is detected immediately.
 - The **last** wait segment lands one minute past the claimed reset
   (landing slack): with only seconds of clock skew the first probe meets an
@@ -93,10 +98,10 @@ schedulable retries. With the defaults, 5 decisions wait out the window and
 - When the session's next turn succeeds, a ✅ **recovery notification**
   (priority 3) closes the loop — on the ⚠️ window announcement, and on the
   ❌ final-probe one when that probe succeeds.
-- A 5-hour window (1308 and friends) fits the 5 × 63 min = 315 min span —
-  the window plus a 15-minute slow-clock margin. Weekly/monthly windows
-  (1310, 1317, …) exceed it: the session fails fast and the notification
-  says when the quota resets.
+- A 5-hour window (1308 and friends) fits the 10 min first probe +
+  4 × 78 min = 322 min span — the window plus a slow-clock margin.
+  Weekly/monthly windows (1310, 1317, …) exceed it: the session fails fast
+  and the notification says when the quota resets.
 - A reset time already in the past clamps to the minimum segment (probe).
 - Still quota-limited with the reset still ahead of one probe and the
   budget spent (a moved reset) → fail fast, with one "quota did not
@@ -106,7 +111,7 @@ schedulable retries. With the defaults, 5 decisions wait out the window and
 
 | Event | Copy | Priority | Dedup |
 |---|---|---|---|
-| quota window entered (waiting scheduled) | reset time + auto-recovery scheduled | 4 | once per reset window (key: the parsed reset timestamp) |
+| quota window entered (waiting scheduled) | reset time + auto-recovery scheduled + reset-card hint | 4 | once per reset window (key: the parsed reset timestamp) |
 | quota still limited once the reset is due (final reserve probe scheduled) | quota did not recover | 5 | once per reset window |
 | quota window unreachable (weekly/monthly, or reset moved ahead) | too far to wait, reset time | 5 | once per reset window |
 | quota recovered (the session's next turn succeeds after a wait) | recovered, auto-resumed | 3 | once per tracked wait |
@@ -128,7 +133,7 @@ quota reset card.
     "zhipuai-coding-plan": {
       "enabled": true,
       "notify": true,
-      "quota": { "waitSegments": 7, "reserve": 5, "minSegmentMs": 60000, "maxSegmentMs": 3780000 },
+      "quota": { "waitSegments": 7, "reserve": 5, "minSegmentMs": 60000, "maxSegmentMs": 4680000, "firstSegmentMs": 600000 },
       "rateLimit": { "baseMs": 30000, "factor": 1.5, "maxMs": 600000, "decayAfterMs": 600000 }
     }
   }
@@ -144,6 +149,10 @@ quota reset card.
 - `quota.waitSegments` caps the waiting segments; the usable count is
   `min(waitSegments, 10 − reserve)`. The defaults (5 usable + 5 reserve)
   saturate OpenCode's 10-retry budget exactly.
+- `quota.firstSegmentMs` caps a session's first wait in one window (the
+  reset-card recovery probe); the four later segments each carry at most
+  `maxSegmentMs`, so the two together must still span the windows you care
+  about.
 - `rateLimit` tunes the per-model 1302 backoff (shared per provider+model):
   first delay `baseMs`, multiplied by `factor` (≥ 1, default 1.5) per
   consecutive rate limit up to `maxMs`, resetting to the base after
@@ -181,7 +190,7 @@ work-in-progress retry plugin must never take effect by accident.
 
 ```bash
 bun install
-bun test        # 130 tests
+bun test        # 144 tests
 bun run typecheck
 ```
 
