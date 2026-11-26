@@ -4,7 +4,7 @@
 // plugin package.
 
 import type { Logger } from "./logger.ts"
-import type { NotifySender } from "./notify.ts"
+import type { Notification, NotifySender } from "./notify.ts"
 
 export interface RetryError {
   readonly type: string
@@ -29,7 +29,12 @@ export interface RetryEvent {
 export interface QuotaConfig {
   /** How many retry decisions may be spent on waiting segments. */
   waitSegments: number
-  /** Retry decisions kept back for real retries after the reset. */
+  /**
+   * Retry decisions kept back from wait-planning: spent as one-minute
+   * probes once the claimed reset is due but the quota is still limited
+   * (clock skew / late flush), and left for OpenCode's built-in policy on
+   * any post-reset trouble (e.g. network errors).
+   */
   reserve: number
   /** Lower bound for one waiting segment. */
   minSegmentMs: number
@@ -96,6 +101,12 @@ export interface WaitScheduled {
   readonly resetRaw: string
   readonly delayMs: number
   readonly segments: number
+  /**
+   * Sent when the session's next turn succeeds (the quota recovered and the
+   * session resumed). Providers attach it only while their notifications
+   * are enabled; undefined → recovery is logged only.
+   */
+  readonly recoveredNotification?: Notification
 }
 
 /** Dependencies a provider handler runs against (injected for tests). */

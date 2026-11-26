@@ -1,5 +1,5 @@
 import { describe, test, expect } from "bun:test"
-import { MAX_RETRIES, maxSpanMs, segmentDelay, segmentsAvailable } from "../src/budget.ts"
+import { MAX_RETRIES, decisionsRemaining, maxSpanMs, segmentDelay, segmentsAvailable } from "../src/budget.ts"
 import type { QuotaConfig } from "../src/types.ts"
 
 // OpenCode's built-in retry policy (core model-retry.ts): Schedule.recurs(10)
@@ -34,6 +34,15 @@ describe("segmentsAvailable", () => {
   })
 })
 
+describe("decisionsRemaining", () => {
+  test("counts schedulable decisions including the current one (attempt 2..11)", () => {
+    // First failure → attempt 2 → all 10 decisions remain.
+    expect(decisionsRemaining(2)).toBe(10)
+    // attempt 11 is the final schedulable decision (the last probe).
+    expect(decisionsRemaining(11)).toBe(1)
+  })
+})
+
 describe("segmentDelay", () => {
   test("proportional pacing: remaining time split evenly over segments", () => {
     // 5h window (1308's quota period), 7 segments → 18000000/7
@@ -56,7 +65,25 @@ describe("segmentDelay", () => {
 
   test("clamps to maximum when a single segment would exceed the cap", () => {
     expect(segmentDelay(36_000_000, 7, QUOTA)).toBe(2_700_000)
-    expect(segmentDelay(2_700_001, 1, QUOTA)).toBe(2_700_000)
+    // The final segment rides the landing slack on top of the clamp.
+    expect(segmentDelay(2_700_001, 1, QUOTA)).toBe(2_760_000)
+  })
+
+  test("the final wait segment (segments === 1) lands one minute past the reset", () => {
+    // 40 minutes left, one segment (within the test's 45-min cap):
+    // 40 min + 1 min landing slack — seconds-level clock skew then still
+    // recovers on the first probe.
+    expect(segmentDelay(40 * 60_000, 1, QUOTA)).toBe(41 * 60_000)
+  })
+
+  test("an already-past reset takes no landing slack", () => {
+    expect(segmentDelay(0, 1, QUOTA)).toBe(60_000)
+    expect(segmentDelay(-3_600_000, 1, QUOTA)).toBe(60_000)
+  })
+
+  test("non-final segments carry no landing slack", () => {
+    // 2 minutes over two segments: 1 minute each — no slack anywhere.
+    expect(segmentDelay(120_000, 2, QUOTA)).toBe(60_000)
   })
 
   test("returns 0 when no segments are available (caller must not call)", () => {

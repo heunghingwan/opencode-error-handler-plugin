@@ -5,9 +5,9 @@
       "notify": true,
       "quota": {
         "waitSegments": 7,
-        "reserve": 3,
+        "reserve": 5,
         "minSegmentMs": 60000,
-        "maxSegmentMs": 2700000
+        "maxSegmentMs": 3780000
       },
       "rateLimit": {
         "baseMs": 30000,

@@ -32,14 +32,27 @@ export function segmentsAvailable(attempt: number, quota: QuotaConfig): number {
 }
 
 /**
+ * Landing slack: the LAST waiting segment deliberately lands this far PAST
+ * the claimed reset time. Seconds-level clock skew (local clock ahead of the
+ * server) then still meets an already-reset quota on the first probe — the
+ * fast recovery path — while larger skew is absorbed by the provider
+ * handler's reserve probes: aggregate tolerance is this slack plus
+ * `reserve × minSegmentMs` of one-minute probes.
+ */
+const LANDING_SLACK_MS = 60_000
+
+/**
  * Proportional segment pacing: split the time until the reset evenly over the
  * segments still available, clamped to [minSegmentMs, maxSegmentMs]. A reset
  * time already in the past clamps to the minimum so the session keeps probing.
+ * The final segment (segments === 1) lands LANDING_SLACK_MS past a still-ahead
+ * reset; an already-past reset takes no slack.
  */
 export function segmentDelay(remainingMs: number, segments: number, quota: QuotaConfig): number {
   if (segments <= 0) return 0
   const raw = Math.ceil(remainingMs / segments)
-  return Math.min(quota.maxSegmentMs, Math.max(quota.minSegmentMs, raw))
+  const clamped = Math.min(quota.maxSegmentMs, Math.max(quota.minSegmentMs, raw))
+  return segments === 1 && remainingMs > 0 ? clamped + LANDING_SLACK_MS : clamped
 }
 
 /** The longest window the given waiting segments can cover. */

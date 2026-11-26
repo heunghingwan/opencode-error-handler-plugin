@@ -1,13 +1,16 @@
 // Provider-wide rate-limit backoff, provider-agnostic.
 //
-// A 429 "too many requests" (zhipuai code 1302) is enforced against the
-// ACCOUNT's per-MODEL concurrency cap: N parallel sessions each waiting a
-// fixed delay still send N requests per interval and stay limited. The
-// backoff level therefore lives OUTSIDE the session — in a process-global
-// registry keyed by provider+model — so every 1302 seen by any session (or
-// any per-location handler instance) of the same provider AND model grows
-// one shared sequence and the aggregate request rate actually slows down,
-// while a limited glm-5.3 never slows glm-5.3-flash.
+// A 429 "too many requests" — zhipuai code 1302 (the account's per-model
+// concurrency cap) or 1305 (platform overload; both advices at
+// docs.bigmodel.cn/cn/api/rate-limit amount to "space out requests to this
+// model") — is enforced against the ACCOUNT's per-MODEL request rate:
+// N parallel sessions each waiting a fixed delay still send N requests per
+// interval and stay limited. The backoff level therefore lives OUTSIDE the
+// session — in a process-global registry keyed by provider+model — so every
+// rate-limit-family code seen by any session (or any per-location handler
+// instance) of the same provider AND model grows one shared sequence and
+// the aggregate request rate actually slows down, while a limited glm-5.3
+// never slows glm-5.3-flash.
 //
 // The default curve is deliberately gentle (factor 1.5): agents spend most
 // of their wall-clock running tools, which already spaces requests apart,

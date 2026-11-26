@@ -272,6 +272,47 @@ describe("createRecoveryTracker", () => {
     expect(entry?.extra?.waitedMs).toBe(7_200_000)
   })
 
+  test("re-tracking the same session keeps the first wait's since (total wait, not last segment)", () => {
+    tracker.track("ses_re", wait)
+    now += 5 * 60_000 // a later segment re-tracks the same session
+    tracker.track("ses_re", wait)
+    now += 7_200_000 - 5 * 60_000
+    tracker.handleEvent({ type: "session.execution.succeeded", data: { sessionID: "ses_re" } })
+    const entry = logs.find((l) => l.msg === "quota recovered — session resumed")
+    expect(entry?.extra?.waitedMs).toBe(7_200_000)
+  })
+
+  test("sends the wait's recovery notification on recovery", () => {
+    const sent: Notification[] = []
+    const t = createRecoveryTracker(() => now, logger, (n) => { sent.push(n); return true })
+    t.track("ses_n1", {
+      ...wait,
+      recoveredNotification: { title: "✅ 智譜額度已恢復（1308）", message: "額度已於 2026-11-26 11:00:00（UTC+8）重置，任務自動繼續。", priority: 3 },
+    })
+    t.handleEvent({ type: "session.execution.succeeded", data: { sessionID: "ses_n1" } })
+    expect(sent).toHaveLength(1)
+    expect(sent[0]?.title).toContain("已恢復")
+    expect(logs.some((l) => l.msg === "quota recovered — session resumed")).toBe(true)
+  })
+
+  test("no recovery notification when the wait carries none (notify off)", () => {
+    const sent: Notification[] = []
+    const t = createRecoveryTracker(() => now, logger, (n) => { sent.push(n); return true })
+    t.track("ses_n2", wait)
+    t.handleEvent({ type: "session.execution.succeeded", data: { sessionID: "ses_n2" } })
+    expect(sent).toBeEmpty()
+    expect(logs.some((l) => l.msg === "quota recovered — session resumed")).toBe(true)
+  })
+
+  test("a throwing sender never breaks recovery logging", () => {
+    const t = createRecoveryTracker(() => now, logger, () => { throw new Error("boom") })
+    t.track("ses_n3", { ...wait, recoveredNotification: { title: "x", message: "y" } })
+    expect(() =>
+      t.handleEvent({ type: "session.execution.succeeded", data: { sessionID: "ses_n3" } }),
+    ).not.toThrow()
+    expect(logs.some((l) => l.msg === "quota recovered — session resumed")).toBe(true)
+  })
+
   test("session.deleted clears the wait silently", () => {
     tracker.track("ses_4", wait)
     tracker.handleEvent({ type: "session.deleted", data: { sessionID: "ses_4" } })

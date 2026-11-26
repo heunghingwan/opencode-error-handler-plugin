@@ -14,7 +14,7 @@
 import { Plugin } from "@opencode/plugin"
 import { readConfigFile, resolveConfig } from "./config.ts"
 import { createFileLogger, type Logger } from "./logger.ts"
-import { createRpcSender, type Notification } from "./notify.ts"
+import { createRpcSender, type Notification, type NotifySender } from "./notify.ts"
 import { providerRegistry } from "./registry.ts"
 import type { ProviderConfig, ProviderHandler, RetryEvent, WaitScheduled } from "./types.ts"
 
@@ -77,18 +77,23 @@ interface PendingWait {
   readonly code: string
   readonly resetRaw: string
   readonly since: number
+  readonly recoveredNotification?: Notification
 }
 
 export interface RecoveryTracker {
   /** Records a scheduled wait (called from the retry hook via deps.track). */
   track(sessionID: string, wait: WaitScheduled): void
-  /** Feeds one event-stream event; logs and clears on recovery. */
+  /** Feeds one event-stream event; logs, notifies and clears on recovery. */
   handleEvent(event: unknown): void
 }
 
 const PENDING_CAP = 128
 
-export function createRecoveryTracker(now: () => number, logger: Logger): RecoveryTracker {
+export function createRecoveryTracker(
+  now: () => number,
+  logger: Logger,
+  send?: NotifySender,
+): RecoveryTracker {
   const pending = new Map<string, PendingWait>()
 
   const track = (sessionID: string, wait: WaitScheduled) => {
@@ -96,7 +101,38 @@ export function createRecoveryTracker(now: () => number, logger: Logger): Recove
       const oldest = pending.keys().next().value
       if (oldest !== undefined) pending.delete(oldest)
     }
-    pending.set(sessionID, { code: wait.code, resetRaw: wait.resetRaw, since: now() })
+    // Keep the FIRST wait's `since` on re-tracking: one window tracks once
+    // per segment (and once per probe), and the recovery log/notification
+    // want the total wait, not the time since the last segment.
+    const since = pending.get(sessionID)?.since ?? now()
+    pending.set(sessionID, {
+      code: wait.code,
+      resetRaw: wait.resetRaw,
+      since,
+      recoveredNotification: wait.recoveredNotification,
+    })
+  }
+
+  // Fire-and-forget like the provider handlers' sends: a lost recovery
+  // notification is low-stakes (the session visibly continues), so there is
+  // no dedup window to roll back — a failure is only logged.
+  const notifyRecovered = (sessionID: string, wait: PendingWait) => {
+    if (send === undefined || wait.recoveredNotification === undefined) return
+    try {
+      const result = send(wait.recoveredNotification)
+      Promise.resolve(result).then(
+        (delivered) => {
+          if (delivered !== true) {
+            logger.debug("recovery notification not delivered", { session: sessionID })
+          }
+        },
+        (err) => {
+          logger.debug("recovery notification failed", { session: sessionID, error: String(err) })
+        },
+      )
+    } catch (err) {
+      logger.debug("recovery notification failed", { session: sessionID, error: String(err) })
+    }
   }
 
   const handleEvent = (event: unknown) => {
@@ -114,6 +150,7 @@ export function createRecoveryTracker(now: () => number, logger: Logger): Recove
         resetAt: wait.resetRaw,
         waitedMs: now() - wait.since,
       })
+      notifyRecovered(sessionID, wait)
     } else if (type === "session.execution.failed") {
       // Quota may be back while something else failed; keep watching — the
       // next successful turn still counts as recovery.
@@ -136,13 +173,13 @@ export default Plugin.define({
       .filter(([, cfg]) => cfg.enabled)
       .map(([id]) => id)
     logger.info("plugin initialized", {
-      version: "0.5.0",
+      version: "0.6.0",
       enabledProviders: enabled,
       configLoaded: file !== null,
       location: ctx.location.directory,
     })
 
-    const tracker = createRecoveryTracker(() => Date.now(), logger)
+    const tracker = createRecoveryTracker(() => Date.now(), logger, createRpcSender(ctx.rpc, logger))
     const hook = createHookHandler({
       config,
       now: () => Date.now(),
