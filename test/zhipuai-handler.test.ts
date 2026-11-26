@@ -177,6 +177,24 @@ describe("1302 rate limit — provider-wide exponential backoff", () => {
     expect(third.decision).toEqual({ retry: true, delay: 68_000 })
   })
 
+  test("different models keep independent backoffs (limits are per model)", () => {
+    // 1302 means the account's concurrency cap for THAT model was hit;
+    // glm-5.3 being limited says nothing about glm-5.3-flash.
+    const h = harness()
+    const main1 = ev(body1302())
+    h.handle(main1)
+    expect(main1.decision).toEqual({ retry: true, delay: 30_000 })
+    const main2 = ev(body1302())
+    h.handle(main2)
+    expect(main2.decision).toEqual({ retry: true, delay: 45_000 })
+    const flash = ev(body1302(), {
+      sessionID: "ses_title",
+      model: { providerID: "zhipuai-coding-plan", id: "glm-5.3-flash" },
+    })
+    h.handle(flash)
+    expect(flash.decision).toEqual({ retry: true, delay: 30_000 })
+  })
+
   test("the level decays back to the base after a quiet period", () => {
     let now = NOW
     const h = harness({}, now)

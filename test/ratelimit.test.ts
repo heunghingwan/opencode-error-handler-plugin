@@ -1,5 +1,5 @@
 import { describe, test, expect } from "bun:test"
-import { RateLimitBackoff, sharedRateLimitBackoff } from "../src/ratelimit.ts"
+import { RateLimitBackoff, rateLimitKey, sharedRateLimitBackoff } from "../src/ratelimit.ts"
 import type { RateLimitConfig } from "../src/types.ts"
 
 const CFG: RateLimitConfig = { baseMs: 30_000, maxMs: 600_000, decayAfterMs: 600_000, factor: 1.5 }
@@ -86,6 +86,11 @@ describe("RateLimitBackoff", () => {
 })
 
 describe("sharedRateLimitBackoff", () => {
+  test("rateLimitKey combines provider and model", () => {
+    expect(rateLimitKey("zhipuai-coding-plan", "glm-5.3")).toBe("zhipuai-coding-plan/glm-5.3")
+    expect(rateLimitKey("zhipuai-coding-plan", "glm-5.3-flash")).toBe("zhipuai-coding-plan/glm-5.3-flash")
+  })
+
   test("the same providerID shares one backoff across handler instances", () => {
     // Simulates two plugin handler instances (one per location) serving
     // different sessions of the same provider: the level must be shared.

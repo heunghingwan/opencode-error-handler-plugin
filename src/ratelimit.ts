@@ -1,12 +1,13 @@
 // Provider-wide rate-limit backoff, provider-agnostic.
 //
 // A 429 "too many requests" (zhipuai code 1302) is enforced against the
-// ACCOUNT, not the session: N parallel sessions each waiting a fixed delay
-// still send N requests per interval and stay limited. The backoff level
-// therefore lives OUTSIDE the session — in a process-global registry keyed
-// by providerID — so every 1302 seen by any session (or any per-location
-// handler instance) of the same provider grows one shared sequence and the
-// aggregate request rate actually slows down.
+// ACCOUNT's per-MODEL concurrency cap: N parallel sessions each waiting a
+// fixed delay still send N requests per interval and stay limited. The
+// backoff level therefore lives OUTSIDE the session — in a process-global
+// registry keyed by provider+model — so every 1302 seen by any session (or
+// any per-location handler instance) of the same provider AND model grows
+// one shared sequence and the aggregate request rate actually slows down,
+// while a limited glm-5.3 never slows glm-5.3-flash.
 //
 // The default curve is deliberately gentle (factor 1.5): agents spend most
 // of their wall-clock running tools, which already spaces requests apart,
@@ -66,16 +67,26 @@ export class RateLimitBackoff {
 const shared = new Map<string, RateLimitBackoff>()
 
 /**
- * The process-global backoff for one provider. Handler instances (one per
- * active location) for the same providerID share a single sequence — that
+ * The registry key for one provider+model pair. Zhipu's 1302 is the
+ * account's per-MODEL concurrency cap ("当前模型的并发请求数已达到账户上
+ * 限" — docs.bigmodel.cn/cn/api/rate-limit), so the sequence is shared by
+ * every session of the same model and independent per model.
+ */
+export function rateLimitKey(providerID: string, modelID: string): string {
+  return `${providerID}/${modelID}`
+}
+
+/**
+ * The process-global backoff for one provider+model. Handler instances (one
+ * per active location) for the same key share a single sequence — that
  * sharing is the feature, see the module comment. The config of the first
  * creation wins; later instances read the same config file, so they agree.
  */
-export function sharedRateLimitBackoff(providerID: string, config: RateLimitConfig): RateLimitBackoff {
-  let backoff = shared.get(providerID)
+export function sharedRateLimitBackoff(key: string, config: RateLimitConfig): RateLimitBackoff {
+  let backoff = shared.get(key)
   if (backoff === undefined) {
     backoff = new RateLimitBackoff(config)
-    shared.set(providerID, backoff)
+    shared.set(key, backoff)
   }
   return backoff
 }

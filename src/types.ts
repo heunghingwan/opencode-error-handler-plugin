@@ -85,9 +85,9 @@ export interface HandlerDeps {
   logger: Logger
   /**
    * The providerID this handler was registered under. Rate-limit backoff
-   * state is shared process-wide per provider (see src/ratelimit.ts), and
-   * this key is what makes instances for different locations of the same
-   * provider share one sequence.
+   * state is shared process-wide per provider+model (see src/ratelimit.ts);
+   * this is the provider half of that key, making instances for different
+   * locations of the same provider share one sequence per model.
    */
   providerID: string
   /** Called when the provider schedules a quota wait for a session. The

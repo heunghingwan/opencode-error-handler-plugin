@@ -8,7 +8,7 @@
 // https://docs.bigmodel.cn/cn/api/api-code (summary below).
 //
 // 429 family, by behavior:
-//   1302                    account rate limit        → provider-wide
+//   1302                    per-model concurrency      → provider+model-wide
 //                                                    exponential backoff
 //                                                    (shared process-global,
 //                                                    see src/ratelimit.ts)
@@ -29,7 +29,7 @@
 import { maxSpanMs, segmentDelay, segmentsAvailable } from "../budget.ts"
 import type { Logger } from "../logger.ts"
 import { NotifyGate, type Notification } from "../notify.ts"
-import { sharedRateLimitBackoff, type BackoffDecision } from "../ratelimit.ts"
+import { rateLimitKey, sharedRateLimitBackoff, type BackoffDecision } from "../ratelimit.ts"
 import type { HandlerDeps, ProviderConfig, ProviderEntry, RetryEvent } from "../types.ts"
 
 export interface ParsedBody {
@@ -94,10 +94,11 @@ export const DEFAULT_CONFIG: ProviderConfig = {
   // (reset now on the website), so notifications are on by default.
   notify: true,
   quota: { waitSegments: 7, reserve: 3, minSegmentMs: 60_000, maxSegmentMs: 2_700_000 },
-  // 1302 is account-wide: 30 s base growing ×1.5 to a 10 min ceiling, shared
-  // by every session of this provider in the process (see src/ratelimit.ts).
-  // Gentle on purpose: tool execution between requests already spaces them;
-  // only sustained hammering climbs the whole curve.
+  // 1302 is the account's per-model concurrency cap: 30 s base growing ×1.5
+  // to a 10 min ceiling, shared by every session of the same provider+model
+  // in the process (see src/ratelimit.ts). Gentle on purpose: tool
+  // execution between requests already spaces them; only sustained
+  // hammering climbs the whole curve.
   rateLimit: { baseMs: 30_000, maxMs: 600_000, decayAfterMs: 600_000, factor: 1.5 },
 }
 
@@ -137,9 +138,6 @@ export const zhipuaiCodingPlan: ProviderEntry = {
   createHandler(deps: HandlerDeps, config: ProviderConfig) {
     const gate = new NotifyGate()
     const logger: Logger = deps.logger
-    // Provider-wide, process-global: every handler instance (one per
-    // location) and every session of this provider shares this sequence.
-    const rateLimitBackoff = sharedRateLimitBackoff(deps.providerID, config.rateLimit)
 
     // Fire-and-forget with rollback: never let notification trouble reach
     // the retry path, and never let a FAILED delivery consume a dedup
@@ -181,16 +179,22 @@ export const zhipuaiCodingPlan: ProviderEntry = {
       const code = parsed.code
 
       if (code === RATE_LIMIT_CODE) {
-        // Account-level rate limit: exponential backoff shared across ALL
-        // sessions and locations of this provider — N parallel sessions
-        // each waiting a fixed delay would keep the account limited; one
-        // growing sequence is what actually slows the request rate.
+        // Per-model concurrency limit: exponential backoff shared across ALL
+        // sessions and locations of this provider+model — N parallel
+        // sessions each waiting a fixed delay would keep the model limited;
+        // one growing sequence is what actually slows the request rate. The
+        // lookup is per event because the model is per event.
+        const rateLimitBackoff = sharedRateLimitBackoff(
+          rateLimitKey(deps.providerID, event.model.id),
+          config.rateLimit,
+        )
         const backoff: BackoffDecision = rateLimitBackoff.next(deps.now())
         event.decision = { retry: true, delay: backoff.delayMs }
         logger.info("rate limit — provider-wide exponential backoff", {
           session: event.sessionID,
           code,
           attempt: event.attempt,
+          model: event.model.id,
           delayMs: backoff.delayMs,
           backoffLevel: backoff.level,
         })

@@ -34,19 +34,21 @@ the body as `{"error":{"code":"...","message":"..."}}`. OpenCode maps every
 
 | Codes | Meaning | Behavior |
 |---|---|---|
-| `1302` | account rate limit | provider-wide exponential backoff (below) |
+| `1302` | per-model concurrency limit (the account's cap, per model; scaled by plan tier and peak hours) | provider+model-wide exponential backoff (below) |
 | `1305` | model overloaded | OpenCode built-in backoff |
 | `1308`, `1310`, `1316`–`1321` | quota window exhausted; the message carries a reset time (`next_flush_time`, Beijing time UTC+8) | segmented waiting (below) |
 | `1113`, `1309`, `1311`, `1313`, `1314`, `1315` | fatal — a human must act (recharge, renew, change key/model, lift a fair-use limit) | fail fast + notification with the actionable hint |
 | anything else | | OpenCode built-in (decision untouched) |
 
-### Rate-limit backoff (`1302`, provider-wide)
+### Rate-limit backoff (`1302`, per provider × model)
 
-A 429 rate limit is enforced against the *account*, not the session: N
-parallel sessions each retrying after a fixed 30 s still send N requests per
-interval and stay limited. So the 1302 backoff is **exponential and shared
-process-wide per provider** — every 1302 from any session (any project, any
-worktree) grows one sequence:
+1302 means the account's concurrency cap **for that model** was hit
+("当前模型的并发请求数已达到账户上限" —
+[rate-limit docs](https://docs.bigmodel.cn/cn/api/rate-limit)), so the
+backoff is **exponential and shared process-wide per provider+model** —
+every 1302 from any session (any project, any worktree) calling the same
+model grows one sequence, while a limited `glm-5.3` never slows
+`glm-5.3-flash`:
 
 - 30 s ×1.5 per consecutive rate limit: 30 s, 45 s, 68 s, 101 s, 152 s,
   228 s, 342 s, 513 s, then capped at 10 min
@@ -56,12 +58,13 @@ worktree) grows one sequence:
   hitting the limit in the same burst stagger to 30/45/68/101/152 s, and
   only *sustained* limiting (a hammering loop with no tool time) climbs to
   the cap. `factor: 2` restores classic doubling if you want it harsher.
-- Ten quiet minutes without a 1302 (`decayAfterMs`) reset the sequence to
-  the base — the account was demonstrably no longer limited.
-- The level lives in a module-scope registry keyed by providerID: OpenCode
-  loads a plugin module once per server process, so all per-location
-  instances share it. It never notifies (transient — it recovers alone) and
-  is logged at info with the delay and backoff level.
+- Ten quiet minutes without a 1302 on that model (`decayAfterMs`) reset the
+  sequence to the base — that model was demonstrably no longer limited.
+- The level lives in a module-scope registry keyed by `providerID/modelID`:
+  OpenCode loads a plugin module once per server process, so all
+  per-location instances share it. It never notifies (transient — it
+  recovers alone) and is logged at info with the model, delay, and backoff
+  level.
 
 ### Quota segmented waiting
 
@@ -123,9 +126,10 @@ quota reset card.
   `rateLimit.maxMs < baseMs` revert both).
 - `quota.waitSegments + quota.reserve` must stay within OpenCode's 10-retry
   budget to mean anything; the defaults (7+3) saturate it exactly.
-- `rateLimit` tunes the provider-wide 1302 backoff: first delay `baseMs`,
-  multiplied by `factor` (≥ 1, default 1.5) per consecutive rate limit up to
-  `maxMs`, resetting to the base after `decayAfterMs` without a rate limit.
+- `rateLimit` tunes the per-model 1302 backoff (shared per provider+model):
+  first delay `baseMs`, multiplied by `factor` (≥ 1, default 1.5) per
+  consecutive rate limit up to `maxMs`, resetting to the base after
+  `decayAfterMs` without a rate limit.
 
 ## Loading (three stages)
 
@@ -146,7 +150,7 @@ work-in-progress retry plugin must never take effect by accident.
 
 ```bash
 bun install
-bun test        # 106 tests
+bun test        # 108 tests
 bun run typecheck
 ```
 
