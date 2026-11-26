@@ -40,6 +40,13 @@ export interface QuotaConfig {
   minSegmentMs: number
   /** Upper bound for one waiting segment. */
   maxSegmentMs: number
+  /**
+   * Delay cap for a session's FIRST wait in one quota window: a short probe
+   * so a user who plays the provider's reset card (quota recovers
+   * immediately) gets auto-recovery within this window. Only applied with
+   * two or more segments left; the single landing segment keeps its slack.
+   */
+  firstSegmentMs: number
 }
 
 /**

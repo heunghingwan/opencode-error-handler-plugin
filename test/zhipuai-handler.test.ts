@@ -539,7 +539,7 @@ test("DEFAULT_CONFIG ships zhipuai enabled with notifications", () => {
   expect(DEFAULT_CONFIG).toEqual({
     enabled: true,
     notify: true,
-    quota: { waitSegments: 7, reserve: 5, minSegmentMs: 60_000, maxSegmentMs: 3_780_000 },
+    quota: { waitSegments: 7, reserve: 5, minSegmentMs: 60_000, maxSegmentMs: 3_780_000, firstSegmentMs: 600_000 },
     rateLimit: {
       baseMs: 30_000,
       maxMs: 600_000,

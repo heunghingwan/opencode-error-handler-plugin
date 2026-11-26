@@ -108,6 +108,9 @@ export const DEFAULT_CONFIG: ProviderConfig = {
     // 63 min: 5 usable segments × 63 min = 315 min of span — the 5-hour
     // window plus the same 15-min slow-clock margin 7 × 45 min used to give.
     maxSegmentMs: 3_780_000,
+    // Delay cap for a session's FIRST wait in a window (reset-card fast
+    // recovery probe). Wired up in the handler; see budget.ts.
+    firstSegmentMs: 600_000,
   },
   // 1302 (account per-model concurrency cap) and 1305 (platform overload)
   // both back off on one shared curve: 30 s base growing ×1.5 to a 10 min

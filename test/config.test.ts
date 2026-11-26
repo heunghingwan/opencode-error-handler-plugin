@@ -18,7 +18,7 @@ const REGISTRY: Record<string, { defaultConfig: ProviderConfig }> = {
     defaultConfig: {
       enabled: true,
       notify: true,
-      quota: { waitSegments: 7, reserve: 5, minSegmentMs: 60_000, maxSegmentMs: 3_780_000 },
+      quota: { waitSegments: 7, reserve: 5, minSegmentMs: 60_000, maxSegmentMs: 3_780_000, firstSegmentMs: 600_000 },
       rateLimit: {
         baseMs: 30_000,
         maxMs: 600_000,
@@ -32,7 +32,7 @@ const REGISTRY: Record<string, { defaultConfig: ProviderConfig }> = {
     defaultConfig: {
       enabled: true,
       notify: false,
-      quota: { waitSegments: 4, reserve: 2, minSegmentMs: 30_000, maxSegmentMs: 600_000 },
+      quota: { waitSegments: 4, reserve: 2, minSegmentMs: 30_000, maxSegmentMs: 600_000, firstSegmentMs: 300_000 },
       rateLimit: { baseMs: 10_000, maxMs: 120_000, decayAfterMs: 300_000, factor: 2 },
     },
   },
@@ -89,7 +89,7 @@ describe("resolveConfig", () => {
     expect(resolved.providers["other-provider"]).toEqual({
       enabled: true,
       notify: false,
-      quota: { waitSegments: 4, reserve: 2, minSegmentMs: 30_000, maxSegmentMs: 600_000 },
+      quota: { waitSegments: 4, reserve: 2, minSegmentMs: 30_000, maxSegmentMs: 600_000, firstSegmentMs: 300_000 },
       rateLimit: { baseMs: 10_000, maxMs: 120_000, decayAfterMs: 300_000, factor: 2 },
     })
   })
@@ -103,7 +103,7 @@ describe("resolveConfig", () => {
     expect(resolved.providers["zhipuai-coding-plan"]).toEqual({
       enabled: true,
       notify: false,
-      quota: { waitSegments: 7, reserve: 5, minSegmentMs: 60_000, maxSegmentMs: 3_780_000 },
+      quota: { waitSegments: 7, reserve: 5, minSegmentMs: 60_000, maxSegmentMs: 3_780_000, firstSegmentMs: 600_000 },
       rateLimit: {
         baseMs: 30_000,
         maxMs: 600_000,
@@ -125,6 +125,7 @@ describe("resolveConfig", () => {
       reserve: 5,
       minSegmentMs: 60_000,
       maxSegmentMs: 900_000,
+      firstSegmentMs: 600_000,
     })
   })
 
@@ -229,7 +230,7 @@ describe("resolveConfig", () => {
     expect(resolved.providers["zhipuai-coding-plan"]).toEqual({
       enabled: true,
       notify: true,
-      quota: { waitSegments: 7, reserve: 5, minSegmentMs: 60_000, maxSegmentMs: 3_780_000 },
+      quota: { waitSegments: 7, reserve: 5, minSegmentMs: 60_000, maxSegmentMs: 3_780_000, firstSegmentMs: 600_000 },
       rateLimit: {
         baseMs: 30_000,
         maxMs: 600_000,

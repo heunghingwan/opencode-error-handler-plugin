@@ -1,12 +1,15 @@
 import { describe, test, expect } from "bun:test"
-import { MAX_RETRIES, decisionsRemaining, maxSpanMs, segmentDelay, segmentsAvailable } from "../src/budget.ts"
+import { FirstWaitRegistry, MAX_RETRIES, decisionsRemaining, maxSpanMs, segmentDelay, segmentsAvailable } from "../src/budget.ts"
 import type { QuotaConfig } from "../src/types.ts"
 
 // OpenCode's built-in retry policy (core model-retry.ts): Schedule.recurs(10)
 // — at most 10 retries after the initial attempt. Hook events carry the
 // upcoming attempt number, so attempt spans 2..11 and "12 - attempt" is the
 // number of retry decisions still schedulable, including the current one.
-const QUOTA: QuotaConfig = { waitSegments: 7, reserve: 3, minSegmentMs: 60_000, maxSegmentMs: 2_700_000 }
+const QUOTA: QuotaConfig = { waitSegments: 7, reserve: 3, minSegmentMs: 60_000, maxSegmentMs: 2_700_000, firstSegmentMs: 600_000 }
+
+// Fixed epoch for the FirstWaitRegistry tests.
+const NOW = Date.UTC(2026, 10, 25, 10, 0, 0)
 
 describe("segmentsAvailable", () => {
   test("matches OpenCode's 10-retry budget arithmetic on default config", () => {
@@ -101,4 +104,54 @@ describe("maxSpanMs", () => {
 
 test("MAX_RETRIES pins OpenCode's built-in retry budget", () => {
   expect(MAX_RETRIES).toBe(10)
+})
+
+describe("segmentDelay first probe", () => {
+  test("first wait of a window is capped at firstSegmentMs", () => {
+    // share = ceil(18_000_000 / 5) = 3_600_000 → capped to 600_000
+    expect(segmentDelay(18_000_000, 5, QUOTA, true)).toBe(600_000)
+  })
+  test("short window: proportional share beats the cap", () => {
+    // share = ceil(1_800_000 / 5) = 360_000 < 600_000
+    expect(segmentDelay(1_800_000, 5, QUOTA, true)).toBe(360_000)
+  })
+  test("segments === 1 is exempt (landing segment never split)", () => {
+    // 20 min + 1 min landing slack, NOT 600_000
+    expect(segmentDelay(1_200_000, 1, QUOTA, true)).toBe(1_260_000)
+  })
+  test("non-first waits stay proportional", () => {
+    expect(segmentDelay(9_000_000, 5, QUOTA, false)).toBe(1_800_000)
+  })
+})
+
+describe("maxSpanMs first-aware", () => {
+  test("window entry: firstSegmentMs + (segments−1) × maxSegmentMs", () => {
+    expect(maxSpanMs(5, QUOTA, true)).toBe(600_000 + 4 * 2_700_000) // 11_400_000
+  })
+  test("mid-window and single-segment spans unchanged", () => {
+    expect(maxSpanMs(5, QUOTA, false)).toBe(13_500_000)
+    expect(maxSpanMs(1, QUOTA, true)).toBe(2_700_000)
+  })
+})
+
+describe("FirstWaitRegistry", () => {
+  test("marks a key once", () => {
+    const reg = new FirstWaitRegistry()
+    expect(reg.isFirst("s1:w", NOW, NOW)).toBe(true)
+    expect(reg.isFirst("s1:w", NOW, NOW)).toBe(false)
+    expect(reg.isFirst("s2:w", NOW, NOW)).toBe(true)
+  })
+  test("entries stale an hour past their reset are pruned on insert", () => {
+    const reg = new FirstWaitRegistry()
+    reg.isFirst("s3:stale", NOW - 3_600_001, NOW)
+    reg.isFirst("s4:fresh", NOW, NOW) // insert triggers the prune
+    expect(reg.isFirst("s3:stale", NOW, NOW)).toBe(true)
+  })
+  test("FIFO cap evicts the oldest", () => {
+    const capped = new FirstWaitRegistry(2)
+    capped.isFirst("a", NOW, NOW)
+    capped.isFirst("b", NOW, NOW)
+    capped.isFirst("c", NOW, NOW)
+    expect(capped.isFirst("a", NOW, NOW)).toBe(true)
+  })
 })
