@@ -12,11 +12,17 @@
 // no database trace — the file is the only audit record.
 
 import { Plugin } from "@opencode/plugin"
+import pkg from "../package.json"
 import { readConfigFile, resolveConfig } from "./config.ts"
 import { createFileLogger, type Logger } from "./logger.ts"
 import { createRpcSender, type Notification, type NotifySender } from "./notify.ts"
 import { providerRegistry } from "./registry.ts"
 import type { ProviderConfig, ProviderHandler, RetryEvent, WaitScheduled } from "./types.ts"
+
+/** The release reported by the init log line — derived from package.json so
+ * it can never drift from the shipped version (it once did: 0.7.0 shipped
+ * with the log still claiming 0.6.0). */
+export const PLUGIN_VERSION = pkg.version
 
 export interface HookDeps {
   config: { readonly providers: Record<string, ProviderConfig> }
@@ -173,7 +179,7 @@ export default Plugin.define({
       .filter(([, cfg]) => cfg.enabled)
       .map(([id]) => id)
     logger.info("plugin initialized", {
-      version: "0.6.0",
+      version: PLUGIN_VERSION,
       enabledProviders: enabled,
       configLoaded: file !== null,
       location: ctx.location.directory,

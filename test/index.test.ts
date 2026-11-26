@@ -2,11 +2,18 @@ import { describe, test, expect, beforeEach, afterEach } from "bun:test"
 import fs from "node:fs"
 import os from "node:os"
 import path from "node:path"
-import pluginDefault, { createHookHandler, createRecoveryTracker } from "../src/index.ts"
+import pluginDefault, { PLUGIN_VERSION, createHookHandler, createRecoveryTracker } from "../src/index.ts"
+import pkg from "../package.json"
 import { providerRegistry } from "../src/registry.ts"
 import { resetRateLimitBackoffs } from "../src/ratelimit.ts"
 import type { Notification } from "../src/notify.ts"
 import type { ProviderConfig, RetryEvent } from "../src/types.ts"
+
+test("the init log's version tracks package.json (no release drift)", () => {
+  // The audit log is this plugin's only runtime version signal: the string
+  // an operator checks to confirm a release actually loaded.
+  expect(PLUGIN_VERSION).toBe(pkg.version)
+})
 
 const silentLogger = {
   debug: () => {},

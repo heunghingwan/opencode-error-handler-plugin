@@ -85,7 +85,7 @@ schedulable retries. With the defaults, 5 decisions wait out the window and
   5 usable segments with `reserve=5`). Proportional pacing: each segment
   sleeps `time-until-reset / segments-still-available`, clamped to
   `[minSegmentMs, maxSegmentMs]` (60 s … 78 min by default; a 5-hour window
-  hit at entry paces 10 → ~73 → ~73 → ~72 → 73 min). Every wake-up
+  hit at entry paces 10 → 72.5 × 3 → 73.5 min). Every wake-up
   makes a real API call, so recovery is detected immediately.
 - The **last** wait segment lands one minute past the claimed reset
   (landing slack): with only seconds of clock skew the first probe meets an
@@ -153,6 +153,11 @@ quota reset card.
   reset-card recovery probe); the four later segments each carry at most
   `maxSegmentMs`, so the two together must still span the windows you care
   about.
+- **Upgrading from ≤ 0.6.0 with a copied config?** If you pinned
+  `maxSegmentMs: 3780000` from the old template, raise it to `4680000` or
+  remove the field: the window-entry span is now
+  `firstSegmentMs + 4 × maxSegmentMs`, and the old value spans only 262 min —
+  five-hour windows would fail fast instead of waiting them out.
 - `rateLimit` tunes the per-model 1302 backoff (shared per provider+model):
   first delay `baseMs`, multiplied by `factor` (≥ 1, default 1.5) per
   consecutive rate limit up to `maxMs`, resetting to the base after
@@ -190,7 +195,7 @@ work-in-progress retry plugin must never take effect by accident.
 
 ```bash
 bun install
-bun test        # 144 tests
+bun test        # 145 tests
 bun run typecheck
 ```
 
