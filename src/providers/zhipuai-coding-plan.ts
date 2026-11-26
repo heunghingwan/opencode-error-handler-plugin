@@ -18,18 +18,21 @@
 //   1313, 1314, 1315                                  → fail fast + notify
 //   everything else                                    → OpenCode built-in
 //
-// The 5-hour quota window (1308 and friends) is spanned by proportional
-// segments: 5 wait segments (10 decisions − 5 held in reserve) × 63 min of
-// span = 315 min — the window plus the same 15-min slow-clock margin the
-// earlier 7 × 45 configuration had. The LAST wait segment lands 1 min past
-// the claimed reset (budget.ts landing slack), and once the reset is due
-// but the quota is still limited the reserve is spent as one-minute
-// probes — an aggregate ~6 min of local-clock-ahead skew absorbed before
-// giving up. Weekly/monthly windows (1310, 1317, 1319, 1321) exceed the
-// span, so they fail fast with the reset time in the notification. That is
-// decided dynamically from the parsed reset time, not hardcoded per code.
+// The 5-hour quota window (1308 and friends) is spanned by waiting
+// segments: the session's FIRST wait in a window is a short probe capped
+// at 10 min (the plan's reset card recovers the quota at once — the ⚠️
+// notification says so), then 4 proportional segments of up to 78 min
+// (10 + 4 × 78 = 322 min — the window plus a slow-clock margin; the 5
+// wait segments are 10 decisions − 5 held in reserve). The LAST wait
+// segment lands 1 min past the claimed reset (budget.ts landing slack),
+// and once the reset is due but the quota is still limited the reserve is
+// spent as one-minute probes — an aggregate ~6 min of local-clock-ahead
+// skew absorbed before giving up. Weekly/monthly windows (1310, 1317,
+// 1319, 1321) exceed the span, so they fail fast with the reset time in
+// the notification. That is decided dynamically from the parsed reset
+// time, not hardcoded per code.
 
-import { decisionsRemaining, maxSpanMs, segmentDelay, segmentsAvailable } from "../budget.ts"
+import { FirstWaitRegistry, decisionsRemaining, maxSpanMs, segmentDelay, segmentsAvailable } from "../budget.ts"
 import type { Logger } from "../logger.ts"
 import { NotifyGate, type Notification } from "../notify.ts"
 import { rateLimitKey, sharedRateLimitBackoff, type BackoffDecision } from "../ratelimit.ts"
@@ -105,11 +108,13 @@ export const DEFAULT_CONFIG: ProviderConfig = {
     // fast-clock tolerance is ~6 min.
     reserve: 5,
     minSegmentMs: 60_000,
-    // 63 min: 5 usable segments × 63 min = 315 min of span — the 5-hour
-    // window plus the same 15-min slow-clock margin 7 × 45 min used to give.
-    maxSegmentMs: 3_780_000,
-    // Delay cap for a session's FIRST wait in a window (reset-card fast
-    // recovery probe). Wired up in the handler; see budget.ts.
+    // 78 min: 10 min first probe + 4 × 78 min = 322 min of span — the
+    // 5-hour window plus a slow-clock margin (the earlier 5 × 63 = 315
+    // configuration had no first probe to spend the span on).
+    maxSegmentMs: 4_680_000,
+    // The session's first wait in a window: a short probe so a user who
+    // plays the reset card (quota recovers immediately) auto-recovers
+    // within 10 minutes. See budget.ts segmentDelay.
     firstSegmentMs: 600_000,
   },
   // 1302 (account per-model concurrency cap) and 1305 (platform overload)
@@ -166,6 +171,7 @@ export const zhipuaiCodingPlan: ProviderEntry = {
   defaultConfig: DEFAULT_CONFIG,
   createHandler(deps: HandlerDeps, config: ProviderConfig) {
     const gate = new NotifyGate()
+    const firstWaits = new FirstWaitRegistry()
     const logger: Logger = deps.logger
 
     // Fire-and-forget with rollback: never let notification trouble reach
@@ -290,6 +296,11 @@ export const zhipuaiCodingPlan: ProviderEntry = {
 
       const remaining = reset.epoch - deps.now()
       const segments = segmentsAvailable(event.attempt, config.quota)
+      // The session's first wait for this reset window gets the short
+      // first-probe cap (reset-card fast recovery); later waits recompute
+      // proportionally. Keyed per (session × window): a second session
+      // entering the same window gets its own first probe.
+      const first = firstWaits.isFirst(`${event.sessionID}:${reset.raw}`, reset.epoch, deps.now())
 
       if (segments <= 0) {
         if (remaining > config.quota.minSegmentMs) {
@@ -354,7 +365,7 @@ export const zhipuaiCodingPlan: ProviderEntry = {
         return
       }
 
-      if (remaining > maxSpanMs(segments, config.quota)) {
+      if (remaining > maxSpanMs(segments, config.quota, first)) {
         // The window is beyond what the retry budget can span (weekly or
         // monthly quota): fail fast and tell the user when it resets.
         event.decision = { retry: false }
@@ -363,7 +374,7 @@ export const zhipuaiCodingPlan: ProviderEntry = {
           code,
           attempt: event.attempt,
           remainingMs: remaining,
-          maxSpanMs: maxSpanMs(segments, config.quota),
+          maxSpanMs: maxSpanMs(segments, config.quota, first),
           resetAt: reset.raw,
         })
         if (config.notify) {
@@ -372,7 +383,7 @@ export const zhipuaiCodingPlan: ProviderEntry = {
             Infinity,
             {
               title: `❌ 智譜額度用盡（${code}，無法等待重置）`,
-              message: `距重置時間尚有 ${humanizeMs(remaining)}，超出可等待範圍（${segments} 段 × ${Math.round(config.quota.maxSegmentMs / 60_000)} 分鐘），已停止重試。重置時間：${reset.raw}。`,
+              message: `距重置時間尚有 ${humanizeMs(remaining)}，超出可等待範圍（最長約 ${humanizeMs(maxSpanMs(segments, config.quota, first))}），已停止重試。重置時間：${reset.raw}。`,
               priority: 5,
             },
           )
@@ -380,7 +391,7 @@ export const zhipuaiCodingPlan: ProviderEntry = {
         return
       }
 
-      const delay = segmentDelay(remaining, segments, config.quota)
+      const delay = segmentDelay(remaining, segments, config.quota, first)
       event.decision = { retry: true, delay }
       deps.track?.(event.sessionID, {
         code,
@@ -397,6 +408,7 @@ export const zhipuaiCodingPlan: ProviderEntry = {
         attempt: event.attempt,
         segments,
         delayMs: delay,
+        firstProbe: first,
         resetAt: reset.raw,
       })
       if (config.notify) {
@@ -405,7 +417,7 @@ export const zhipuaiCodingPlan: ProviderEntry = {
           Infinity,
           {
             title: `⚠️ 智譜額度用盡（${code}）`,
-            message: `額度已用盡（錯誤碼 ${code}），將於 ${reset.raw}（UTC+8）重置。已排程分段等待與自動恢復：額度恢復後將自動繼續任務。`,
+            message: `額度已用盡（錯誤碼 ${code}），將於 ${reset.raw}（UTC+8）重置。已排程分段等待與自動恢復：額度恢復後將自動繼續任務。若使用重置卡提前重置，將於首段探測（${humanizeMs(config.quota.firstSegmentMs)}）自動恢復。`,
             priority: 4,
           },
         )

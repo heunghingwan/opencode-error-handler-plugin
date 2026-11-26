@@ -270,12 +270,13 @@ describe("1302 rate limit — provider-wide exponential backoff", () => {
 })
 
 describe("quota segmented waiting", () => {
-  test("1308 at attempt 2: proportional delay, one notification", () => {
+  test("1308 at attempt 2: 10-minute first probe (reset-card fast recovery), one notification", () => {
     const h = harness()
     const event = ev(body1308(RESET_A))
     h.handle(event)
-    // 7,812,000 ms over 5 segments = 1,562,400 ms
-    expect(event.decision).toEqual({ retry: true, delay: 1_562_400 })
+    // A session's first wait in a window is capped at firstSegmentMs (10 min)
+    // instead of the proportional share (7,812,000 / 5 = 1,562,400 ms).
+    expect(event.decision).toEqual({ retry: true, delay: 600_000 })
     expect(h.sent).toHaveLength(1)
     expect(h.sent[0]?.title).toContain("1308")
     expect(h.sent[0]?.message).toContain(RESET_A)
@@ -283,8 +284,43 @@ describe("quota segmented waiting", () => {
     expect(h.sent[0]?.priority).toBe(4)
   })
 
+  test("the ⚠️ notification tells the user a card reset recovers at the first probe", () => {
+    const h = harness()
+    const event = ev(body1308(RESET_A))
+    h.handle(event)
+    expect(h.sent[0]?.message).toContain("若使用重置卡提前重置，將於首段探測（10 分）自動恢復。")
+  })
+
+  test("second wait in the same window: proportional with the raised cap", () => {
+    let now = NOW
+    const handler = zhipuaiCodingPlan.createHandler(
+      { now: () => now, send: () => true, logger: silentLogger, providerID: freshProviderID() },
+      DEFAULT_CONFIG,
+    )
+    const first = ev(body1308(RESET_A))
+    handler(first)
+    expect(first.decision).toEqual({ retry: true, delay: 600_000 })
+    now += 600_000
+    const second = ev(body1308(RESET_A), { attempt: 3 })
+    handler(second)
+    // ceil((7_812_000 − 600_000) / 4) = 1_803_000
+    expect(second.decision).toEqual({ retry: true, delay: 1_803_000 })
+  })
+
+  test("each session gets its own first probe in the same window", () => {
+    const h = harness()
+    h.handle(ev(body1308(RESET_A))) // ses_1 first probe
+    const other = ev(body1308(RESET_A), { sessionID: "ses_2" })
+    h.handle(other)
+    expect(other.decision).toEqual({ retry: true, delay: 600_000 })
+    const again = ev(body1308(RESET_A), { attempt: 3 }) // ses_1, window seen
+    h.handle(again)
+    expect(again.decision).toEqual({ retry: true, delay: 1_953_000 })
+  })
+
   test("each event recomputes segments from its own attempt", () => {
     const h = harness()
+    h.handle(ev(body1308(RESET_A))) // registers the window → no first cap below
     const event = ev(body1308(RESET_A), { attempt: 3 })
     h.handle(event)
     // 7,812,000 ms over 4 segments = 1,953,000 ms
@@ -295,7 +331,7 @@ describe("quota segmented waiting", () => {
     const h = harness()
     const event = ev(body1316(RESET_A))
     h.handle(event)
-    expect(event.decision).toEqual({ retry: true, delay: 1_562_400 })
+    expect(event.decision).toEqual({ retry: true, delay: 600_000 })
     expect(h.sent).toHaveLength(1)
   })
 
@@ -323,6 +359,8 @@ describe("quota segmented waiting", () => {
     expect(event.decision).toEqual({ retry: false })
     expect(h.sent).toHaveLength(1)
     expect(h.sent[0]?.message).toContain("2099-06-01 12:00:00")
+    // The copy names the first-aware span: 10 min + 4 × 78 min = 322 min.
+    expect(h.sent[0]?.message).toContain("最長約 5 小時 22 分")
     expect(h.sent[0]?.priority).toBe(5)
   })
 
@@ -434,8 +472,9 @@ describe("skew walkthrough — local clock 3 minutes ahead of the server", () =>
       now += delay
     }
     expect(delays).toEqual([
-      3_564_000, 3_564_000, 3_564_000, 3_564_000, // 4 × ceil(17_820_000 / 5)
-      3_624_000, // last segment: 3_564_000 + 60 s landing slack
+      600_000, // first probe: min(firstSegmentMs, ceil(17_820_000 / 5))
+      4_305_000, 4_305_000, 4_305_000, // proportional: ceil(remaining / 4|3|2)
+      4_365_000, // last segment: 4_305_000 + 60 s landing slack
       60_000, 60_000, // reserve probes while the true reset is still ahead
     ])
     // Local clock now reads past the reset; the next attempt runs exactly
@@ -488,7 +527,7 @@ describe("notification dedup", () => {
     const h = harness({ notify: false })
     const event = ev(body1308(RESET_A))
     h.handle(event)
-    expect(event.decision).toEqual({ retry: true, delay: 1_562_400 })
+    expect(event.decision).toEqual({ retry: true, delay: 600_000 })
     expect(h.sent).toBeEmpty()
   })
 })
@@ -531,7 +570,7 @@ describe("robustness", () => {
     )
     const event = ev(body1308(RESET_A))
     expect(() => handler(event)).not.toThrow()
-    expect(event.decision).toEqual({ retry: true, delay: 1_562_400 })
+    expect(event.decision).toEqual({ retry: true, delay: 600_000 })
   })
 })
 
@@ -539,7 +578,7 @@ test("DEFAULT_CONFIG ships zhipuai enabled with notifications", () => {
   expect(DEFAULT_CONFIG).toEqual({
     enabled: true,
     notify: true,
-    quota: { waitSegments: 7, reserve: 5, minSegmentMs: 60_000, maxSegmentMs: 3_780_000, firstSegmentMs: 600_000 },
+    quota: { waitSegments: 7, reserve: 5, minSegmentMs: 60_000, maxSegmentMs: 4_680_000, firstSegmentMs: 600_000 },
     rateLimit: {
       baseMs: 30_000,
       maxMs: 600_000,
@@ -551,12 +590,12 @@ test("DEFAULT_CONFIG ships zhipuai enabled with notifications", () => {
 })
 
 test("default quota arithmetic still spans the 5-hour window with a slow-clock margin", () => {
-  // 10 decisions − 5 reserved = 5 usable wait segments × 63 min = 315 min:
-  // the 5-hour window plus the same 15-min slow-clock margin the old
-  // 7 × 45 configuration had.
+  // 10 decisions − 5 reserved = 5 usable wait segments: a 10-min first probe
+  // (reset card fast recovery) + 4 × 78 min = 322 min — the 5-hour window
+  // plus a slow-clock margin (was 5 × 63 = 315 min before the first probe).
   const usable = segmentsAvailable(2, DEFAULT_CONFIG.quota)
   expect(usable).toBe(5)
-  expect(maxSpanMs(usable, DEFAULT_CONFIG.quota)).toBe(18_900_000)
+  expect(maxSpanMs(usable, DEFAULT_CONFIG.quota, true)).toBe(19_320_000)
 })
 
 describe("notification delivery failures release the dedup window", () => {
